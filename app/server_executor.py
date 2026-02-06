@@ -134,9 +134,9 @@ class CalendarAgentExecutor(AgentExecutor):
             # it means either the session maps to no user (anonymous) or the user has no Google Creds yet.
             # We should return a failure or instructions to authenticate.
             await updater.update_status(
-                TaskState.failed,
+                TaskState.auth_required,
                 new_agent_text_message(
-                    "Authentication missing or expired. Please run the client with --profile to login.",
+                    "Authentication missing or expired.",
                     task.context_id,
                     task.id
                 )

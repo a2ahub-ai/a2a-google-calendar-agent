@@ -1,3 +1,28 @@
+Metadata-Version: 2.4
+Name: a2a-google-calendar-agent
+Version: 0.1.0
+Summary: An autonomous agent that manages calendar events using the A2A SDK.
+Requires-Python: >=3.12
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: a2a-sdk[sql]>=0.3.10
+Requires-Dist: autopep8>=2.3.2
+Requires-Dist: fastmcp>=2.12.5
+Requires-Dist: google-adk>=1.17.0
+Requires-Dist: google-auth-oauthlib>=1.2.3
+Requires-Dist: loguru>=0.7.3
+Requires-Dist: openai>=2.6.1
+Requires-Dist: pydantic>=2.12.3
+Requires-Dist: python-dotenv>=1.1.1
+Requires-Dist: tiktoken>=0.12.0
+Requires-Dist: redis>=5.0.0
+Requires-Dist: pyjwt>=2.8.0
+Requires-Dist: asyncclick>=8.3.0.7
+Provides-Extra: dev
+Requires-Dist: autopep8>=2.0.0; extra == "dev"
+Requires-Dist: pre-commit>=3.6.0; extra == "dev"
+Dynamic: license-file
+
 # A2A Calendar Agent
 
 A calendar agent that retrieves events and reminders using the Google Calendar API. It is built with the A2A SDK and supports natural language queries.
@@ -54,12 +79,8 @@ You can use the provided CLI tool to interact with the agent for testing.
 
 ```bash
 uv run cli --agent "http://localhost:10001"
-```
-
-For Authentication
-```bash
 uv run cli --agent="http://localhost:10001" --profile user1
-uv run cli --agent="http://localhost:10001" --header="Authorization=Bearer <token>"
+uv run cli --agent="http://localhost:10001" --header="token"
 ```
 
 ### CLI Usage

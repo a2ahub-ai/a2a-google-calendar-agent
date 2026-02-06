@@ -5,7 +5,6 @@ import time
 import base64
 import logging
 from typing import Optional, Dict, Any
-from urllib.parse import urlencode, parse_qs, quote, unquote
 
 import redis
 import jwt
@@ -226,5 +225,5 @@ async def handle_token(request: Request):
     return JSONResponse({
         "access_token": session_token,
         "token_type": "Bearer",
-        "expires_in": 3600 * 24 * 365
+        "expires_in": SESSION_EXPIRY_SECONDS
     })

@@ -183,14 +183,7 @@ async def cli(
     header,
     enabled_extensions,
 ):
-    headers = {}
-    for h in header:
-        if '=' in h:
-            key, val = h.split('=', 1)
-            headers[key] = val
-        elif h.startswith('ey'):
-            # Heuristic: treat raw JWT token in --header as Bearer token
-            headers['Authorization'] = f'Bearer {h}'
+    headers = {h.split('=')[0]: h.split('=')[1] for h in header}
 
     # Auth Logic
     if bearer_token:
