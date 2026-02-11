@@ -3,8 +3,7 @@ import base64
 import os
 import urllib.parse
 import webbrowser
-import json
-import logging
+
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 from pathlib import Path
@@ -58,7 +57,7 @@ class OAuthClient:
                 return self.token
             except Exception:
                 pass
-        return None
+        return ""
 
     def _find_oauth_flow(self):
         # Look for OAuth2 security scheme in agent card
