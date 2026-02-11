@@ -167,6 +167,7 @@ async def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
         Route('/authorize', endpoint=handle_authorize, methods=['GET']),
         Route('/auth/callback', endpoint=handle_auth_callback, methods=['GET']),
         Route('/token', endpoint=handle_token, methods=['POST']),
+        Route('/authenticate', endpoint=handle_auth, methods=['GET']),
     ])
 
     app = Starlette(

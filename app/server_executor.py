@@ -1,9 +1,13 @@
 import json
 import os
 import sys
+import uuid
 import asyncio
 from typing import List, cast, Dict, Any, Optional
 from urllib.parse import urlencode, urlparse, parse_qs
+
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.oauth2.credentials import Credentials
 
 from a2a.server.agent_execution import AgentExecutor
 from a2a.server.agent_execution.context import RequestContext
@@ -23,7 +27,7 @@ from a2a.utils import new_agent_text_message, new_task
 
 from openai.types.chat import ChatCompletionMessageParam
 
-from app.auth import get_google_creds
+from app.auth import get_google_creds, store_google_creds, create_session_token, verify_session_token
 from .server_agent import MCPClient
 from app.utils.logger import logger
 
@@ -33,15 +37,27 @@ from app.constants import ChatCompletionTypeEnum
 class CalendarAgentExecutor(AgentExecutor):
     """An AgentExecutor that runs an ADK-based Agent for calendar event and reminder retrieval."""
 
+    _awaiting_auth: Dict[str, asyncio.Future]
+    _credentials: Dict[str, Dict[str, Any]]
+
     def __init__(self, runner: MCPClient, card: AgentCard):
         logger.debug("Initializing CalendarAgentExecutor...")
         self.runner = runner
         self._card = card
         self._active_sessions: set[str] = set()
+        self._awaiting_auth = {}
+        self._credentials = {}
 
     async def on_auth_callback(self, state: str, url: str):
-        # Deprecated
-        pass
+        if state not in self._awaiting_auth:
+            logger.warning(
+                'Received auth callback for unknown or already processed state: %s. '
+                'Available states: %s',
+                state,
+                list(self._awaiting_auth.keys())
+            )
+            return
+        self._awaiting_auth[state].set_result(url)
 
     def _convert_task_history_to_messages(self, task_history) -> List[ChatCompletionMessageParam]:
         """Convert task history to ChatCompletionMessageParam format"""
@@ -88,6 +104,91 @@ class CalendarAgentExecutor(AgentExecutor):
             return context.call_context.user.user_name or "anonymous"
         return "anonymous"
 
+    async def _handle_auth_flow(self, context: RequestContext, updater: TaskUpdater) -> Optional[Dict[str, Any]]:
+        client_id = os.environ.get("GOOGLE_CLIENT_ID")
+        client_secret = os.environ.get("GOOGLE_CLIENT_SECRET")
+        if not client_id or not client_secret:
+            logger.error("GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET not set")
+            await updater.update_status(
+                TaskState.failed,
+                message=new_agent_text_message("Server configuration error: OAuth credentials missing.", context.context_id)
+            )
+            return None
+
+        # Ensure correct redirect URI
+        base_url = self._card.url.rstrip('/')
+        redirect_uri = f"{base_url}/authenticate"
+
+        flow = InstalledAppFlow.from_client_config(
+            {
+                "installed": {
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "redirect_uris": [redirect_uri],
+                    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                    "token_uri": "https://oauth2.googleapis.com/token",
+                }
+            },
+            scopes=['https://www.googleapis.com/auth/calendar']
+        )
+        flow.redirect_uri = redirect_uri
+        auth_url, state = flow.authorization_url(prompt='consent', access_type='offline')
+
+        future = asyncio.get_running_loop().create_future()
+        self._awaiting_auth[state] = future
+
+        logger.info(f"Initiating auth flow, state: {state}")
+        # Send auth required status with URL
+        await updater.update_status(
+            TaskState.auth_required,
+            message=new_agent_text_message(auth_url, context.context_id)
+        )
+
+        try:
+            logger.debug(f"Waiting for auth callback...")
+            # Wait for callback
+            callback_url = await asyncio.wait_for(future, timeout=300)
+        except asyncio.TimeoutError:
+            logger.warning("Auth timeout")
+            self._awaiting_auth.pop(state, None)
+            await updater.update_status(
+                TaskState.failed,
+                message=new_agent_text_message("Timed out waiting for authorization.", context.context_id)
+            )
+            return None
+
+        self._awaiting_auth.pop(state, None)
+        logger.info("Auth callback received")
+
+        # Parse code
+        try:
+            parsed = urlparse(callback_url)
+            params = parse_qs(parsed.query)
+            code = params.get('code', [None])[0]
+
+            if not code:
+                logger.error("No code in callback URL")
+                return None
+
+            flow.fetch_token(code=code)
+            creds = flow.credentials
+            creds_json = json.loads(creds.to_json())
+
+            user_id = self._get_user_id(context)
+            if user_id == "anonymous":
+                user_id = str(uuid.uuid4())
+
+            # Store in-memory and in Redis
+            self._credentials[user_id] = creds_json
+            store_google_creds(user_id, creds_json)
+
+            # Generate session token to return
+            session_token = create_session_token(user_id)
+            return {"token": session_token}
+        except Exception as e:
+            logger.error(f"Error exchanging code for token: {e}")
+            return None
+
     async def execute(
         self,
         context: RequestContext,
@@ -126,23 +227,6 @@ class CalendarAgentExecutor(AgentExecutor):
             ),
         )
 
-        # Retrieve Google Credentials from Vault (Redis)
-        auth_info = get_google_creds(user_id)
-        if not auth_info:
-            logger.warning(f"No credentials found for user {user_id}")
-            # The client should have handled auth, but if we are here and have no creds
-            # it means either the session maps to no user (anonymous) or the user has no Google Creds yet.
-            # We should return a failure or instructions to authenticate.
-            await updater.update_status(
-                TaskState.auth_required,
-                new_agent_text_message(
-                    "Authentication missing or expired.",
-                    task.context_id,
-                    task.id
-                )
-            )
-            return
-
         # Convert task history to messages
         messages = self._convert_task_history_to_messages(task.history)
         if not messages and query:
@@ -151,50 +235,92 @@ class CalendarAgentExecutor(AgentExecutor):
                 "content": query
             }))
 
-        logger.debug(f"Auth info found for user {user_id}")
+        max_retries = 1
+        for attempt in range(max_retries + 1):
+            # Retrieve Google Credentials from Vault (Redis) or memory
+            auth_info = get_google_creds(user_id)
+            if not auth_info:
+                auth_info = self._credentials.get(user_id)
 
-        async for response in self.runner.process_query(messages, auth_info=auth_info):
-            logger.debug(f"[calendar-agent] response type: {response['type']}")
+            logger.debug(f"Auth info found for user {user_id}")
+            retry_needed = False
 
-            if response["type"] == ChatCompletionTypeEnum.CONTENT:
-                if response["data"]:
-                    await updater.update_status(
-                        TaskState.working,
-                        new_agent_text_message(response["data"], task.context_id, task.id)
-                    )
-                    await updater.add_artifact([Part(root=TextPart(text=response["data"]))], name="Text Response")
+            async for response in self.runner.process_query(messages, auth_info=auth_info or {}):
+                logger.debug(f"[calendar-agent] response type: {response['type']}")
 
-            elif response["type"] == ChatCompletionTypeEnum.DATA:
-                # Check for tool results
-                data = response.get("data", {})
-                if not data:
-                    continue
+                if response["type"] == ChatCompletionTypeEnum.CONTENT:
+                    if response["data"]:
+                        await updater.update_status(
+                            TaskState.working,
+                            new_agent_text_message(response["data"], task.context_id, task.id)
+                        )
+                        await updater.add_artifact([Part(root=TextPart(text=response["data"]))], name="Text Response")
 
-                for tool_name, tool_result in data.items():
-                    # Check content text for auth error
-                    content_text = ""
-                    if tool_result and hasattr(tool_result, 'content'):
-                        content_text = " ".join([part.text for part in tool_result.content if part.type == "text"])
+                elif response["type"] == ChatCompletionTypeEnum.DATA:
+                    # Check for tool results
+                    data = response.get("data", {})
+                    if not data:
+                        continue
 
-                    # Normal processing
-                    if tool_result and tool_result.structuredContent:
-                        await updater.add_artifact([Part(root=DataPart(data={tool_name: tool_result.structuredContent}, kind="data", metadata=None))], name="Calendar Events Data")
-                        response_text = f"Retrieved calendar events: {tool_result.structuredContent}"
-                    elif tool_result:
-                        await updater.add_artifact([Part(root=TextPart(text=f"{tool_name}: {content_text}"))], name="Text Response")
-                        response_text = content_text.strip()
-                    else:
-                        response_text = "No result from tool"
+                    auth_error = False
+                    for tool_name, tool_result in data.items():
+                        # Check content text for auth error
+                        content_text = ""
+                        if tool_result and hasattr(tool_result, 'content'):
+                            content_text = " ".join([part.text for part in tool_result.content if part.type == "text"])
 
-                    logger.debug(f"[status] {TaskState.completed}")
-                    await updater.update_status(
-                        TaskState.completed,
-                        new_agent_text_message(response_text, task.context_id, task.id)
-                    )
+                        if "Missing authorization information" in content_text or "Authorization required" in content_text:
+                            auth_error = True
 
-            elif response["type"] == ChatCompletionTypeEnum.DONE:
-                # If we reach here successfully, we are done
-                pass
+                        # Normal processing
+                        if tool_result and tool_result.structuredContent:
+                            await updater.add_artifact([Part(root=DataPart(data={tool_name: tool_result.structuredContent}, kind="data", metadata=None))], name="Calendar Events Data")
+                            response_text = f"Retrieved calendar events: {tool_result.structuredContent}"
+                        elif tool_result:
+                            await updater.add_artifact([Part(root=TextPart(text=f"{tool_name}: {content_text}"))], name="Text Response")
+                            response_text = content_text.strip()
+                        else:
+                            response_text = "No result from tool"
+
+                        logger.debug(f"[status] {TaskState.completed}")
+                        if not auth_error:
+                            await updater.update_status(
+                                TaskState.completed,
+                                new_agent_text_message(response_text, task.context_id, task.id)
+                            )
+
+                    if auth_error:
+                        logger.info("Tool returned auth error. Initiating auth flow.")
+                        auth_result = await self._handle_auth_flow(context, updater)
+                        if auth_result:
+                            # Send token artifact
+                            if 'token' in auth_result:
+                                await updater.add_artifact([Part(root=TextPart(text=auth_result['token']))], name="token")
+
+                                # Update user_id for the retry attempt
+                                decoded = verify_session_token(auth_result['token'])
+                                if decoded and "sub" in decoded:
+                                    user_id = decoded["sub"]
+                                    logger.info(f"Updated session user_id to {user_id}")
+
+                            await updater.update_status(
+                                TaskState.working,
+                                new_agent_text_message("Auth received, continuing...", task.context_id, task.id)
+                            )
+                            retry_needed = True
+                            break  # Break 'async for process_query' to retry outer loop
+                        else:
+                            # Auth failed or timed out
+                            return
+
+                elif response["type"] == ChatCompletionTypeEnum.DONE:
+                    # If we reach here successfully, we are done
+                    pass
+
+            if retry_needed:
+                continue
+            else:
+                break
 
         logger.debug("[calendar-agent] execute exiting")
 

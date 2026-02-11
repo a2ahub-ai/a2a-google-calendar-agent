@@ -167,6 +167,12 @@ class OAuthClient:
 @click.option('--push_notification_receiver', default='http://localhost:5000')
 @click.option('--header', multiple=True)
 @click.option(
+    '--automatic-authentication',
+    default=True,
+    type=bool,
+    help='Whether to automatically open browser for authentication.',
+)
+@click.option(
     '--enabled_extensions',
     default='',
     help='Comma-separated list of extension URIs to enable (sets X-A2A-Extensions header).',
@@ -180,6 +186,7 @@ async def cli(
     use_push_notifications: bool,
     push_notification_receiver: str,
     header,
+    automatic_authentication: bool,
     enabled_extensions,
 ):
     headers = {h.split('=')[0]: h.split('=')[1] for h in header}
@@ -201,7 +208,7 @@ async def cli(
             auth_client = OAuthClient(agent_card=card, profile=profile)
             token = auth_client.get_token()
 
-            if not token:
+            if not token and automatic_authentication:
                 await auth_client.authenticate()
                 token = auth_client.get_token()
 
@@ -271,6 +278,7 @@ async def cli(
                 notification_receiver_port,
                 None,
                 context_id,
+                profile,
             )
 
             if history and continue_loop:
@@ -293,6 +301,7 @@ async def completeTask(
     notification_receiver_port: int,
     task_id,
     context_id,
+    profile="default",
 ):
     prompt_text = await click.prompt(
         '\nWhat do you want to send to the agent? (:q or quit to exit)'
@@ -366,6 +375,18 @@ async def completeTask(
                 event, TaskArtifactUpdateEvent
             ):
                 task_id = event.task_id
+                if isinstance(event, TaskArtifactUpdateEvent):
+                    if event.artifact and event.artifact.name == "token" and event.artifact.parts:
+                        for part in event.artifact.parts:
+                            if hasattr(part.root, 'text'):
+                                # Save the token
+                                token = part.root.text
+                                storage_path = Path(".client_storage") / profile / "session_token"
+                                storage_path.parent.mkdir(parents=True, exist_ok=True)
+                                storage_path.write_text(token)
+                                print(f"\n[Artifact] Token received and saved to {storage_path}")
+                                break
+
                 if (
                     isinstance(event, TaskStatusUpdateEvent)
                     and event.status.state == 'completed'
