@@ -217,16 +217,6 @@ class CalendarAgentExecutor(AgentExecutor):
         user_id = self._get_user_id(context)
         logger.debug(f"User ID: {user_id}")
 
-        logger.debug(f"[status] {TaskState.working}")
-        await updater.update_status(
-            TaskState.working,
-            new_agent_text_message(
-                "I'm retrieving your calendar events and reminders...",
-                task.context_id,
-                task.id,
-            ),
-        )
-
         # Convert task history to messages
         messages = self._convert_task_history_to_messages(task.history)
         if not messages and query:
@@ -263,6 +253,8 @@ class CalendarAgentExecutor(AgentExecutor):
                         continue
 
                     auth_error = False
+                    combined_response_text = []
+
                     for tool_name, tool_result in data.items():
                         # Check content text for auth error
                         content_text = ""
@@ -271,23 +263,32 @@ class CalendarAgentExecutor(AgentExecutor):
 
                         if "Missing authorization information" in content_text or "Authorization required" in content_text:
                             auth_error = True
+                            break  # Stop processing if auth error found
 
                         # Normal processing
                         if tool_result and tool_result.structuredContent:
-                            await updater.add_artifact([Part(root=DataPart(data={tool_name: tool_result.structuredContent}, kind="data", metadata=None))], name="Calendar Events Data")
-                            response_text = f"Retrieved calendar events: {tool_result.structuredContent}"
+                            await updater.add_artifact([Part(root=DataPart(data={tool_name: tool_result.structuredContent}, kind="data", metadata=None))], name=f"{tool_name} Data")
+                            combined_response_text.append(f"I have retrieved data for {tool_name}.")
                         elif tool_result:
-                            await updater.add_artifact([Part(root=TextPart(text=f"{tool_name}: {content_text}"))], name="Text Response")
-                            response_text = content_text.strip()
-                        else:
-                            response_text = "No result from tool"
+                            # For text results, we add it as an artifact.
+                            # We only include it in the message if it is short (< 200 chars), otherwise we summarize.
+                            await updater.add_artifact([Part(root=TextPart(text=f"{tool_name}: {content_text}"))], name=f"{tool_name} Response")
 
+                            if len(content_text) < 200:
+                                combined_response_text.append(content_text.strip())
+                            else:
+                                combined_response_text.append(
+                                    f"I received a response from {tool_name} (see '{tool_name} Response' artifact for details).")
+                        else:
+                            combined_response_text.append(f"No result from {tool_name}")
+
+                    if not auth_error:
                         logger.debug(f"[status] {TaskState.completed}")
-                        if not auth_error:
-                            await updater.update_status(
-                                TaskState.completed,
-                                new_agent_text_message(response_text, task.context_id, task.id)
-                            )
+                        final_message = " ".join(combined_response_text)
+                        await updater.update_status(
+                            TaskState.completed,
+                            new_agent_text_message(final_message, task.context_id, task.id)
+                        )
 
                     if auth_error:
                         logger.info("Tool returned auth error. Initiating auth flow.")

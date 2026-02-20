@@ -33,6 +33,8 @@ from a2a.types import (
     TextPart,
 )
 
+from app.utils.logger import logger
+
 # --- OAuth Client Logic ---
 
 
@@ -74,10 +76,10 @@ class OAuthClient:
     async def authenticate(self):
         flow_config = self._find_oauth_flow()
         if not flow_config:
-            print("No OAuth2 authorization code flow found in Agent Card.")
+            logger.error("No OAuth2 authorization code flow found in Agent Card.")
             return
 
-        print("Initiating Authentication...")
+        logger.info("Initiating Authentication...")
 
         # Start local callback server
         import socket
@@ -129,10 +131,10 @@ class OAuthClient:
             auth_endpoint = flow_config.authorization_url
             auth_url = f"{auth_endpoint}?{urllib.parse.urlencode(params)}"
 
-            print(f"Opening browser: {auth_url}")
+            logger.info(f"Opening browser: {auth_url}")
             webbrowser.open(auth_url)
 
-            print("Waiting for callback...")
+            logger.info("Waiting for callback...")
             code = await future
 
             if not code:
@@ -146,7 +148,7 @@ class OAuthClient:
                 data = resp.json()
                 self.token = data["access_token"]
                 self.storage_path.write_text(self.token)
-                print("Authentication successful & token saved.")
+                logger.info("Authentication successful & token saved.")
 
         finally:
             server.shutdown()
@@ -215,11 +217,11 @@ async def cli(
             if token:
                 headers['Authorization'] = f'Bearer {token}'
             else:
-                print("Warning: No authentication token available.")
+                logger.warning("Warning: No authentication token available.")
 
         except Exception as e:
-            print(f"Authentication warning/error: {e}")
-            print("Continuing without auth header (or with whatever was provided)...")
+            logger.error(f"Authentication warning/error: {e}")
+            logger.info("Continuing without auth header (or with whatever was provided)...")
 
     # --- Add enabled_extensions support ---
     # If the user provided a comma-separated list of extensions,
@@ -234,13 +236,13 @@ async def cli(
         ]
         if ext_list:
             headers[HTTP_EXTENSION_HEADER] = ', '.join(ext_list)
-    print(f'Will use headers: {headers}')
+    logger.info(f'Will use headers: {headers}')
     async with httpx.AsyncClient(timeout=30, headers=headers) as httpx_client:
         card_resolver = A2ACardResolver(httpx_client, agent)
         card = await card_resolver.get_agent_card()
 
-        print('======= Agent Card ========')
-        print(card.model_dump_json(exclude_none=True))
+        logger.info('======= Agent Card ========')
+        logger.info(card.model_dump_json(exclude_none=True))
 
         notif_receiver_parsed = urllib.parse.urlparse(
             push_notification_receiver
@@ -269,7 +271,7 @@ async def cli(
         context_id = str(session) if session != 0 else uuid4().hex
 
         while continue_loop:
-            print('=========  starting a new task ======== ')
+            logger.info('=========  starting a new task ======== ')
             continue_loop, _, task_id = await completeTask(
                 client,
                 streaming,
@@ -282,11 +284,11 @@ async def cli(
             )
 
             if history and continue_loop:
-                print('========= history ======== ')
+                logger.info('========= history ======== ')
                 task_response = await client.get_task(
                     {'id': task_id, 'historyLength': 10}
                 )
-                print(
+                logger.info(
                     task_response.model_dump_json(
                         include={'result': {'history': True}}
                     )
@@ -363,7 +365,7 @@ async def completeTask(
         )
         async for result in response_stream:
             if isinstance(result.root, JSONRPCErrorResponse):
-                print(
+                logger.error(
                     f'Error: {result.root.error}, context_id: {context_id}, task_id: {task_id}'
                 )
                 return False, context_id, task_id
@@ -384,7 +386,7 @@ async def completeTask(
                                 storage_path = Path(".client_storage") / profile / "session_token"
                                 storage_path.parent.mkdir(parents=True, exist_ok=True)
                                 storage_path.write_text(token)
-                                print(f"\n[Artifact] Token received and saved to {storage_path}")
+                                logger.info(f"\n[Artifact] Token received and saved to {storage_path}")
                                 break
 
                 if (
@@ -394,7 +396,7 @@ async def completeTask(
                     task_completed = True
             elif isinstance(event, Message):
                 message = event
-            print(f'stream event => {event.model_dump_json(exclude_none=True)}')
+            logger.info(f'stream event => {event.model_dump_json(exclude_none=True)}')
         # Upon completion of the stream. Retrieve the full task if one was made.
         if task_id and not task_completed:
             taskResultResponse = await client.get_task(
@@ -404,7 +406,7 @@ async def completeTask(
                 )
             )
             if isinstance(taskResultResponse.root, JSONRPCErrorResponse):
-                print(
+                logger.error(
                     f'Error: {taskResultResponse.root.error}, context_id: {context_id}, task_id: {task_id}'
                 )
                 return False, context_id, task_id
@@ -420,7 +422,7 @@ async def completeTask(
             )
             event = event.root.result
         except Exception as e:
-            print('Failed to complete the call', e)
+            logger.error(f'Failed to complete the call: {e}')
         if not context_id:
             context_id = event.context_id
         if isinstance(event, Task):
@@ -431,7 +433,7 @@ async def completeTask(
             message = event
 
     if message:
-        print(f'\n{message.model_dump_json(exclude_none=True)}')
+        logger.info(f'\n{message.model_dump_json(exclude_none=True)}')
         return True, context_id, task_id
     if taskResult:
         # Don't print the contents of a file.
@@ -447,7 +449,7 @@ async def completeTask(
             },
             exclude_none=True,
         )
-        print(f'\n{task_content}')
+        logger.info(f'\n{task_content}')
         # if the result is that more input is required, loop again.
         state = TaskState(taskResult.status.state)
         if state.name == TaskState.input_required.name:
