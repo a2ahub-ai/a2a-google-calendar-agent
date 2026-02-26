@@ -19,9 +19,9 @@ from openai.types import ResponseFormatJSONObject, ResponseFormatJSONSchema, Res
 from .base import LLMProvider
 
 
-class GroqLLMProvider(LLMProvider):
+class OllamaLLMProvider(LLMProvider):
     def __init__(self, api_key: str, model_name: str):
-        self.openai = OpenAI(api_key=api_key, base_url="https://api.groq.com/openai/v1")
+        self.openai = OpenAI(api_key=api_key, base_url="http://localhost:11434/v1")
         self.model_name = model_name
         self.encoder = encoding_for_model("gpt-4o")  # Fallback
 
@@ -50,13 +50,17 @@ class GroqLLMProvider(LLMProvider):
                 params = {
                     "model": self.model_name,
                     "messages": messages,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "max_tokens": max_tokens,
-                    "stop": stop,
                     "stream": True,
                     "stream_options": {"include_usage": True},
                 }
+                if temperature:
+                    params["temperature"] = temperature
+                if top_p:
+                    params["top_p"] = top_p
+                if stop:
+                    params["stop"] = stop
+                if max_tokens:
+                    params["max_tokens"] = max_tokens
                 if response_format:
                     params["response_format"] = response_format
                 if reasoning_effort:
@@ -153,12 +157,16 @@ class GroqLLMProvider(LLMProvider):
                 params = {
                     "model": self.model_name,
                     "messages": messages,
-                    "temperature": temperature,
-                    "top_p": top_p,
-                    "max_tokens": max_tokens,
-                    "stop": stop,
                     "stream": False,
                 }
+                if temperature:
+                    params["temperature"] = temperature
+                if top_p:
+                    params["top_p"] = top_p
+                if stop:
+                    params["stop"] = stop
+                if max_tokens:
+                    params["max_tokens"] = max_tokens
                 if response_format:
                     params["response_format"] = response_format
                 if reasoning_effort:

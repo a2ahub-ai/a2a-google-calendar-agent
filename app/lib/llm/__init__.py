@@ -22,7 +22,7 @@ async def llm_quick_prompt(
         prompt: User prompt
 
     Returns:
-        Dictionary with data, inputTokens, and outputTokens or None
+        Dictionary with data, input_tokens, and output_tokens or None
     """
     llm_messages: List[ChatCompletionMessageParam] = [
         {
@@ -50,8 +50,8 @@ async def llm_quick_prompt(
         if response["type"] == ChatCompletionTypeEnum.DONE:
             return {
                 "data": response.get("data"),
-                "inputTokens": response.get("inputTokens"),
-                "outputTokens": response.get("outputTokens"),
+                "input_tokens": response.get("input_tokens"),
+                "output_tokens": response.get("output_tokens"),
             }
 
     return None
@@ -113,8 +113,8 @@ async def llm_stream_quick_prompt(
             yield {
                 "type": ChatCompletionTypeEnum.DONE,
                 "data": response.get("data"),
-                "inputTokens": response.get("inputTokens"),
-                "outputTokens": response.get("outputTokens"),
+                "input_tokens": response.get("input_tokens"),
+                "output_tokens": response.get("output_tokens"),
             }
             return
 

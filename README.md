@@ -36,7 +36,7 @@ A calendar agent that retrieves events and reminders using the Google Calendar A
     - `OPENAI_API_KEY` or `GROQ_API_KEY`: Required for the LLM.
     - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: Required for Google Calendar OAuth.
 
-    *Note: Ensure your Google Cloud OAuth consent screen is configured and the redirect URI `http://localhost:10001/auth/callback` is added to your OAuth client credentials.*
+    *Note: Ensure your Google Cloud OAuth consent screen is configured and the redirect URI `http://localhost:10010/auth/callback` is added to your OAuth client credentials.*
 
 ## Running the Agent Server
 
@@ -46,14 +46,14 @@ Start the calendar agent server:
 uv run __main__.py
 ```
 
-The agent will be available at `http://localhost:10001` (or the port specified in your `.env` file).
+The agent will be available at `http://localhost:10010` (or the port specified in your `.env` file).
 
 ## Running the CLI Client
 
 You can use the provided CLI tool to interact with the agent for testing.
 
 ```bash
-uv run cli --agent "http://localhost:10001"
+uv run cli --agent "http://localhost:10010"
 ```
 
 ### Authentication
@@ -64,7 +64,7 @@ The CLI supports both automatic and manual authentication.
 By default, the CLI will attempt to authenticate automatically. If a valid session token is not found for the specified profile, it will open your default web browser to the Google OAuth login page.
 
 ```bash
-uv run cli --agent "http://localhost:10001" --profile user1
+uv run cli --agent "http://localhost:10010" --profile user1
 ```
 
 **Manual Authentication**:
@@ -72,10 +72,10 @@ You can provide an existing token manually using the `--header` option or disabl
 
 ```bash
 # Provide a token manually
-uv run cli --agent "http://localhost:10001" --header "Authorization=Bearer <token>"
+uv run cli --agent "http://localhost:10010" --header "Authorization=Bearer <token>"
 
 # Disable automatic authentication
-uv run cli --agent "http://localhost:10001" --profile user1 --automatic-authentication false
+uv run cli --agent "http://localhost:10010" --profile user1 --automatic-authentication false
 ```
 
 ### CLI Usage

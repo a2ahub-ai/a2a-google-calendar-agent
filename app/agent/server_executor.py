@@ -21,6 +21,7 @@ from a2a.types import (
     DataPart,
     UnsupportedOperationError,
     Role,
+    TaskArtifactUpdateEvent
 )
 from a2a.utils.errors import ServerError
 from a2a.utils import new_agent_text_message, new_task
@@ -28,7 +29,8 @@ from a2a.utils import new_agent_text_message, new_task
 from openai.types.chat import ChatCompletionMessageParam
 
 from app.auth import get_google_creds, store_google_creds, create_session_token, verify_session_token
-from .server_agent import MCPClient
+from .server_agent import AgentServer
+from app.remote_agents import RoutingAgent
 from app.utils.logger import logger
 
 from app.constants import ChatCompletionTypeEnum
@@ -40,10 +42,11 @@ class CalendarAgentExecutor(AgentExecutor):
     _awaiting_auth: Dict[str, asyncio.Future]
     _credentials: Dict[str, Dict[str, Any]]
 
-    def __init__(self, runner: MCPClient, card: AgentCard):
+    def __init__(self, runner: AgentServer, card: AgentCard, routing_agent: RoutingAgent | None = None):
         logger.debug("Initializing CalendarAgentExecutor...")
         self.runner = runner
         self._card = card
+        self._routing_agent = routing_agent
         self._active_sessions: set[str] = set()
         self._awaiting_auth = {}
         self._credentials = {}
@@ -141,7 +144,7 @@ class CalendarAgentExecutor(AgentExecutor):
         # Send auth required status with URL
         await updater.update_status(
             TaskState.auth_required,
-            message=new_agent_text_message(auth_url, context.context_id)
+            message=new_agent_text_message(f"Please authorize the application by visiting this URL: {auth_url}", context.context_id)
         )
 
         try:
@@ -189,6 +192,103 @@ class CalendarAgentExecutor(AgentExecutor):
             logger.error(f"Error exchanging code for token: {e}")
             return None
 
+    # ── Remote-agent helpers (calendar-specific orchestration) ──
+
+    @staticmethod
+    def _extract_user_query(messages: List[ChatCompletionMessageParam]) -> str | None:
+        """Extract the last user message text from a message list."""
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role") == "user" and msg.get("content"):
+                return str(msg["content"])
+        return None
+
+    async def _call_datetime_parser(self, user_query: str) -> dict | None:
+        """Call the remote datetime-parser agent and return the parsed result."""
+        if not self._routing_agent:
+            return None
+
+        # Find a datetime-related agent by name
+        datetime_agent_name = None
+        for name in self._routing_agent.agents_info:
+            if "datetime" in name.lower():
+                datetime_agent_name = name
+                break
+        if not datetime_agent_name:
+            # logger.warning("Datetime parser agent not found in routing agent")
+            return None
+
+        try:
+            datetime_result = None
+            async for event in self._routing_agent.request(datetime_agent_name, user_query, metadata={"single_time_mode": False}):
+                if isinstance(event, TaskArtifactUpdateEvent):
+                    if event.artifact and event.artifact.parts:
+                        for part in event.artifact.parts:
+                            if hasattr(part, "root") and hasattr(part.root, "data"):
+                                data = part.root.data
+                                if isinstance(data, dict):
+                                    if "datetime_parser" in data:
+                                        datetime_result = data["datetime_parser"]
+                                    elif "parsable" in data:
+                                        datetime_result = data
+            logger.info(f"📅 Datetime parser result: {datetime_result}")
+            return datetime_result
+        except Exception as e:
+            logger.error(f"Failed to call datetime parser agent: {e}")
+            return None
+
+    def _build_concurrent_tasks(
+        self, messages: List[ChatCompletionMessageParam]
+    ) -> Dict[str, Any]:
+        """Build the dict of concurrent awaitables to run alongside the LLM.
+
+        Add new remote-agent tasks here as they become available.
+        """
+        tasks: Dict[str, Any] = {}
+        user_query = self._extract_user_query(messages)
+
+        if user_query and self._routing_agent:
+            tasks["datetime_parser"] = self._call_datetime_parser(user_query)
+
+        return tasks
+
+    @staticmethod
+    def _calendar_tool_args_enhancer(
+        tool_name: str, tool_args: Any, concurrent_results: Dict[str, Any],
+        auth_info: Optional[Dict[str, Any]] = None,
+        timezone: int | float | None = None,
+    ) -> Any:
+        # Normalize tool_args to dict
+        if isinstance(tool_args, str):
+            try:
+                tool_args = json.loads(tool_args)
+            except json.JSONDecodeError:
+                pass
+
+        if not isinstance(tool_args, dict):
+            return tool_args
+
+        # 1. Merge datetime_parser for all time-aware tools
+        DATETIME_AWARE_TOOLS = {
+            "list_calendar_events",
+            "add_calendar_event",
+            "update_calendar_event",
+            "search_calendar_events",
+        }
+        datetime_result = concurrent_results.get("datetime_parser")
+        if datetime_result and tool_name in DATETIME_AWARE_TOOLS:
+            tool_args["datetime_parser"] = datetime_result
+            logger.info(f"📅 Merged datetime_parser into {tool_name} args")
+
+        # 2. Merge auth_info
+        if auth_info:
+            tool_args["__auth_info"] = auth_info
+
+        # 3. Merge timezone
+        if timezone is not None:
+            tool_args["__timezone"] = timezone
+
+        return tool_args
+
     async def execute(
         self,
         context: RequestContext,
@@ -200,6 +300,13 @@ class CalendarAgentExecutor(AgentExecutor):
             logger.debug(context._params.metadata if context._params.metadata else "No metadata")
         logger.debug(context.context_id)
         logger.debug(context.task_id)
+
+        # Extract timezone from metadata
+        timezone_offset = None
+        if context._params and context._params.metadata:
+            if 'timezone' in context._params.metadata:
+                timezone_offset = context._params.metadata['timezone']
+                logger.info(f"Timezone offset from metadata: {timezone_offset}")
 
         query = context.get_user_input()
         task = context.current_task
@@ -230,12 +337,27 @@ class CalendarAgentExecutor(AgentExecutor):
             # Retrieve Google Credentials from Vault (Redis) or memory
             auth_info = get_google_creds(user_id)
             if not auth_info:
-                auth_info = self._credentials.get(user_id)
+                auth_info = self._credentials.get(user_id) or {}
 
             logger.debug(f"Auth info found for user {user_id}")
             retry_needed = False
 
-            async for response in self.runner.process_query(messages, auth_info=auth_info or {}):
+            # Prepare concurrent tasks and enhancer
+            concurrent_tasks = self._build_concurrent_tasks(messages)
+
+            def tool_args_enhancer_wrapper(tool_name, tool_args, concurrent_results):
+                return self._calendar_tool_args_enhancer(
+                    tool_name,
+                    tool_args,
+                    concurrent_results,
+                    auth_info=auth_info,
+                    timezone=timezone_offset)
+
+            async for response in self.runner.process_query(
+                messages,
+                concurrent_tasks=concurrent_tasks,
+                tool_args_enhancer=tool_args_enhancer_wrapper
+            ):
                 logger.debug(f"[calendar-agent] response type: {response['type']}")
 
                 if response["type"] == ChatCompletionTypeEnum.CONTENT:

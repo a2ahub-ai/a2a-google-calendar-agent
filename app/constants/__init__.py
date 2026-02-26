@@ -11,4 +11,9 @@ class ChatCompletionTypeEnum(Enum):
     TIMEOUT = 6
 
 
-AGENT_DESCRIPTION = "A calendar assistant that retrieves your events and reminders for today"
+AGENT_DESCRIPTION = (
+    "A Google Calendar assistant that can list, create, update, delete, "
+    "and search calendar events. It understands natural language time "
+    "expressions (e.g. 'tomorrow', 'next Monday', 'this week') and "
+    "translates them into precise time ranges via a remote datetime-parser agent."
+)

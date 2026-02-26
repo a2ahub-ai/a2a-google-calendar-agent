@@ -18,6 +18,7 @@ Requires-Dist: tiktoken>=0.12.0
 Requires-Dist: redis>=5.0.0
 Requires-Dist: pyjwt>=2.8.0
 Requires-Dist: asyncclick>=8.3.0.7
+Requires-Dist: groq>=1.0.0
 Provides-Extra: dev
 Requires-Dist: autopep8>=2.0.0; extra == "dev"
 Requires-Dist: pre-commit>=3.6.0; extra == "dev"
@@ -79,8 +80,28 @@ You can use the provided CLI tool to interact with the agent for testing.
 
 ```bash
 uv run cli --agent "http://localhost:10001"
-uv run cli --agent="http://localhost:10001" --profile user1
-uv run cli --agent="http://localhost:10001" --header="token"
+```
+
+### Authentication
+
+The CLI supports both automatic and manual authentication.
+
+**Automatic Authentication (Default)**:
+By default, the CLI will attempt to authenticate automatically. If a valid session token is not found for the specified profile, it will open your default web browser to the Google OAuth login page.
+
+```bash
+uv run cli --agent "http://localhost:10001" --profile user1
+```
+
+**Manual Authentication**:
+You can provide an existing token manually using the `--header` option or disable automatic authentication if needed.
+
+```bash
+# Provide a token manually
+uv run cli --agent "http://localhost:10001" --header "Authorization=Bearer <token>"
+
+# Disable automatic authentication
+uv run cli --agent "http://localhost:10001" --profile user1 --automatic-authentication false
 ```
 
 ### CLI Usage

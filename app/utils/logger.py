@@ -29,9 +29,18 @@ def get_caller_info(stack_index: int = 2) -> str:
 logger.remove()
 # Stdout with pretty format (includes file:function:line by default)
 logger.add(
-    sys.stdout,
+    sys.stderr,
     level="DEBUG",
     format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
+)
+
+# File logger
+log_file_path = os.path.join(PROJECT_ROOT, "logs", "app.log")
+logger.add(
+    log_file_path,
+    level="DEBUG",
+    format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+    rotation="10 MB",
 )
 
 # Export

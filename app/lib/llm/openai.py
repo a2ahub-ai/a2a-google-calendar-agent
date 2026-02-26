@@ -115,8 +115,8 @@ class OpenAILLMProvider(LLMProvider):
 
                 res = {
                     "type": ChatCompletionTypeEnum.DONE,
-                    "inputTokens": usage.prompt_tokens if usage else None,
-                    "outputTokens": usage.completion_tokens if usage else None,
+                    "input_tokens": usage.prompt_tokens if usage else None,
+                    "output_tokens": usage.completion_tokens if usage else None,
                 }
                 if len(content_total) > 0:
                     res["data"] = content_total
@@ -210,7 +210,7 @@ class OpenAILLMProvider(LLMProvider):
                         function_calling_tokens += arg_tokens
                     yield {
                         "type": ChatCompletionTypeEnum.FUNCTION_CALLING,
-                        "outputTokens": function_calling_tokens,
+                        "output_tokens": function_calling_tokens,
                         "data": {
                             "function": parsed_function_calling,
                         },
@@ -218,8 +218,8 @@ class OpenAILLMProvider(LLMProvider):
 
                 yield {
                     "type": ChatCompletionTypeEnum.DONE,
-                    "inputTokens": response.usage.prompt_tokens if response.usage else None,
-                    "outputTokens": response.usage.completion_tokens if response.usage else None,
+                    "input_tokens": response.usage.prompt_tokens if response.usage else None,
+                    "output_tokens": response.usage.completion_tokens if response.usage else None,
                     "data": response.choices[0].message.content,
                 }
 

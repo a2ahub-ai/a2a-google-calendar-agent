@@ -343,6 +343,7 @@ async def completeTask(
         configuration=MessageSendConfiguration(
             accepted_output_modes=['text'],
         ),
+        metadata={'timezone': 7},
     )
 
     if use_push_notifications:

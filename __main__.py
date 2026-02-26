@@ -38,12 +38,13 @@ from a2a.types import (
     SecurityScheme,
 )
 from app.constants import AGENT_DESCRIPTION
-from app.server_agent import (
-    MCPClient,
+from app.agent.server_agent import (
+    AgentServer,
 )
-from app.server_executor import (
+from app.agent.server_executor import (
     CalendarAgentExecutor,
 )
+from app.remote_agents import RoutingAgent
 
 from app.utils.logger import logger
 from app.config.settings import BaseConfig
@@ -132,16 +133,27 @@ async def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
         ],
     )
 
-    runner = MCPClient()
+    # Connect to remote agents (e.g., datetime parser) for concurrent processing
+    routing_agent = None
+    if BaseConfig.REMOTE_AGENT_ADDRESSES:
+        addresses = [addr.strip() for addr in BaseConfig.REMOTE_AGENT_ADDRESSES.split(",") if addr.strip()]
+        if addresses:
+            try:
+                routing_agent = await RoutingAgent.create(addresses)
+                logger.info(f"📡 Connected to remote agents: {list(routing_agent.agents_info.keys())}")
+            except Exception as e:
+                logger.error(f"Failed to connect to remote agents: {e}")
+
+    runner = AgentServer()
     # Use -X utf8 flag to ensure UTF-8 encoding for the subprocess on Windows
     python_cmd = ["python",
                   "-X",
                   "utf8",
-                  "app/server_mcp.py"] if sys.platform == 'win32' else ["python",
-                                                                        "app/server_mcp.py"]
+                  "app/agent/server_mcp.py"] if sys.platform == 'win32' else ["python",
+                                                                        "app/agent/server_mcp.py"]
     await runner.connect_to_stdio_server("calendar-agent", python_cmd)
 
-    agent_executor = CalendarAgentExecutor(runner, agent_card)
+    agent_executor = CalendarAgentExecutor(runner, agent_card, routing_agent=routing_agent)
 
     async def handle_auth(request: Request) -> PlainTextResponse:
         logger.info(f"Auth callback received: {request.url}")

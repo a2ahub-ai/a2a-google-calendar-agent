@@ -36,3 +36,6 @@ class BaseConfig:
     REDIS_DB = int(os.environ.get("REDIS_DB", "0"))
     JWT_SECRET = os.environ.get("JWT_SECRET", "super-secret-jwt-key")
     SESSION_EXPIRY_SECONDS = int(os.environ.get("SESSION_EXPIRY_SECONDS", 365 * 24 * 60 * 60))
+    PROFILE: str = os.environ.get("PROFILE", "default")
+    AUTO_AUTH_MODE: bool = boolean_parser(os.environ.get("AUTO_AUTH_MODE", "false"))
+    REMOTE_AGENT_ADDRESSES: str = os.environ.get("REMOTE_AGENT_ADDRESSES", "")

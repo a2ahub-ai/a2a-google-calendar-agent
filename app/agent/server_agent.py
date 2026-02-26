@@ -1,7 +1,8 @@
 
+import asyncio
 import json
 from contextlib import AsyncExitStack
-from typing import AsyncGenerator, List, Dict, Any, cast
+from typing import AsyncGenerator, List, Dict, Any, Awaitable, Callable, cast
 from openai.types import ResponseFormatJSONSchema
 from openai.types.shared.response_format_json_schema import JSONSchema
 
@@ -18,9 +19,14 @@ from openai.types.chat import ChatCompletionMessageParam, ChatCompletionToolUnio
 from app.config.settings import BaseConfig
 from app.constants import ChatCompletionTypeEnum, AGENT_DESCRIPTION
 from app.lib.llm.groq import GroqLLMProvider
+from app.lib.llm.ollama import OllamaLLMProvider
 from app.lib.llm.openai import OpenAILLMProvider
 from app.types import ChatCompletionStreamResponseType
 from app.utils.logger import logger
+
+# Type alias for concurrent tasks that run alongside the LLM call.
+# Each task is a coroutine that returns an arbitrary result (or None).
+ConcurrentTask = Awaitable[Any]
 
 
 class LoggingHTTPClient(httpx.AsyncClient):
@@ -69,7 +75,7 @@ class LoggingHTTPClient(httpx.AsyncClient):
         return response
 
 
-class MCPClient:
+class AgentServer:
     def __init__(self):
         # Initialize session and client objects for multiple servers
         self.servers: dict[str, ClientSession] = {}  # Map server names to sessions
@@ -80,6 +86,7 @@ class MCPClient:
 
         self.llm = GroqLLMProvider(api_key=BaseConfig.GROQ_API_KEY, model_name="openai/gpt-oss-20b")
         # self.llm = OpenAILLMProvider(api_key=BaseConfig.OPENAI_API_KEY, model_name="gpt-4.1-mini")
+        # self.llm = OllamaLLMProvider(api_key="", model_name="functiongemma:latest")
 
     async def connect_to_server(self, server_name: str, url: str):
         """Connect to an MCP server over HTTP
@@ -153,91 +160,176 @@ class MCPClient:
         # Store the session
         self.servers[server_name] = session
 
-    async def process_query(self, messages: List[ChatCompletionMessageParam], auth_info: Dict[str, Any] = None
-                            ) -> AsyncGenerator[ChatCompletionStreamResponseType, None]:
-        """Process a query using GroqLLMProvider and available tools"""
+    async def process_query(
+        self,
+        messages: List[ChatCompletionMessageParam],
+        concurrent_tasks: Dict[str, ConcurrentTask] | None = None,
+        tool_args_enhancer: Callable[[str, Any, Dict[str, Any]], Any] | None = None,
+    ) -> AsyncGenerator[ChatCompletionStreamResponseType, None]:
+        """Process a query using the LLM and available MCP tools.
+
+        This is a **standalone, reusable** method.  It knows nothing about any
+        specific remote agent (datetime-parser, etc.).  External callers can
+        optionally inject:
+
+        Args:
+            messages: The conversation history (user / assistant / system).
+            concurrent_tasks: A dict of ``{name: awaitable}`` that will be
+                executed **simultaneously** with the LLM call via
+                ``asyncio.gather``.  Their results are collected and forwarded
+                to *tool_args_enhancer*.
+            tool_args_enhancer: An optional callback
+                ``(tool_name, tool_args, concurrent_results) -> tool_args``
+                that is called **before** each MCP tool execution, allowing
+                callers to merge concurrent-task results into the tool
+                arguments.
+        """
         logger.info("🚀 Processing new query")
 
         instruction = AGENT_DESCRIPTION + "\n"
-        instruction += "You are not permitted to answer any user questions beyond your primary task, if a user asks you, simply notify them that you do not have sufficient information to answer that question."
-        # Add AGENT_DESCRIPTION as system message at the beginning
+        instruction += (
+            "You are not permitted to answer any user questions beyond your "
+            "primary task, if a user asks you, simply notify them that you do "
+            "not have sufficient information to answer that question."
+        )
         system_message: ChatCompletionMessageParam = {
             "role": "system",
-            "content": instruction
+            "content": instruction,
         }
         messages = [system_message] + messages
 
         logger.info(f"📝 Messages: {messages}")
 
-        # Collect tools from all connected servers
-        available_tools = []
-        tool_to_server_map = {}  # Map tool names to their server sessions
+        # ── Collect tools from all connected MCP servers ──
+        available_tools: list = []
+        tool_to_server_map: Dict[str, tuple] = {}
 
         for server_name, session in self.servers.items():
             response = await session.list_tools()
             for tool in response.tools:
                 available_tools.append(
                     {
-                        "type": "function",  # OpenAI requires 'type': 'function'
+                        "type": "function",
                         "function": {
                             "name": tool.name,
                             "description": tool.description,
-                            "parameters": tool.inputSchema,  # Use 'parameters' for schema
+                            "parameters": tool.inputSchema,
                         },
                     }
                 )
                 tool_to_server_map[tool.name] = (server_name, session)
 
         logger.info(
-            f"🛠️  Available tools from all servers: {[tool['function']['name'] for tool in available_tools]}"
+            f"🛠️  Available tools from all servers: "
+            f"{[t['function']['name'] for t in available_tools]}"
         )
 
-        # Initial GroqLLMProvider call
-        logger.info("📞 Making initial GroqLLMProvider call...")
-        function_calls = []
+        # ── Run LLM + concurrent tasks SIMULTANEOUSLY ──
+        async def _collect_llm() -> tuple[list[ChatCompletionStreamResponseType], list]:
+            """Consume the LLM stream and return (content_chunks, function_calls)."""
+            chunks: list[ChatCompletionStreamResponseType] = []
+            fn_calls: list = []
+            async for rc in self.llm.chat_completion(
+                messages=messages,
+                tools=available_tools,
+                tool_choice="auto",
+                parallel_tool_calls=True,
+                temperature=1,
+                reasoning_effort="low"
+            ):
+                logger.debug(f"Response chunk: {rc}")
+                if rc["type"] == ChatCompletionTypeEnum.CONTENT:
+                    chunks.append(rc)
+                elif rc["type"] == ChatCompletionTypeEnum.FUNCTION_CALLING:
+                    if (
+                        rc.get("data")
+                        and isinstance(rc["data"], dict)
+                        and rc["data"].get("function")
+                    ):
+                        fn_calls = rc["data"]["function"]
+                        logger.info(f"🔧 LLM requested {len(fn_calls)} tool call(s)")
+                elif rc["type"] == ChatCompletionTypeEnum.DONE:
+                    break
+            return chunks, fn_calls
 
-        async for response_chunk in self.llm.chat_completion(
-            messages=messages,
-            tools=available_tools,
-            tool_choice="auto",
-            parallel_tool_calls=True,
-            temperature=0.7,
-            reasoning_effort="low"
-        ):
-            logger.debug(f"Response chunk: {response_chunk}")
-            if response_chunk["type"] == ChatCompletionTypeEnum.CONTENT:
-                yield response_chunk
-            elif response_chunk["type"] == ChatCompletionTypeEnum.FUNCTION_CALLING:
-                if response_chunk.get("data") and isinstance(
-                        response_chunk["data"], dict) and response_chunk["data"].get("function"):
-                    function_calls = response_chunk["data"]["function"]
-                    logger.info(f"🔧 LLM requested {len(function_calls)} tool call(s)")
+        # Build the list of awaitables: LLM first, then any concurrent tasks.
+        task_names: list[str] = []
+        awaitables: list[asyncio.Future] = [_collect_llm()]
+        if concurrent_tasks:
+            for name, coro in concurrent_tasks.items():
+                task_names.append(name)
+                awaitables.append(coro)
 
-            elif response_chunk["type"] == ChatCompletionTypeEnum.DONE:
-                yield ChatCompletionStreamResponseType(
-                    type=ChatCompletionTypeEnum.DONE,
-                    data=None)
-                break
+        logger.info(
+            f"📞 Running LLM + {len(task_names)} concurrent task(s) "
+            f"{task_names} simultaneously..."
+        )
 
-        # Process tool calls if any
+        gather_results = await asyncio.gather(*awaitables, return_exceptions=True)
+
+        # Unpack LLM result (always index 0).
+        llm_result = gather_results[0]
+        if isinstance(llm_result, BaseException):
+            logger.error(f"LLM call failed: {llm_result}")
+            yield ChatCompletionStreamResponseType(
+                type=ChatCompletionTypeEnum.ERROR,
+                data=str(llm_result),
+            )
+            return
+        
+        # Check if llm_result is a tuple or list as expected
+        if isinstance(llm_result, (tuple, list)) and len(llm_result) == 2:
+            content_chunks, function_calls = llm_result
+        else:
+            logger.error(f"Unexpected LLM result format: {llm_result}")
+            content_chunks, function_calls = [], []
+
+        # Unpack concurrent-task results into a name→result dict.
+        concurrent_results: Dict[str, Any] = {}
+        for idx, name in enumerate(task_names):
+            # concurrency results start at index 1
+            res = gather_results[idx + 1]
+            if isinstance(res, BaseException):
+                logger.error(f"Concurrent task '{name}' failed: {res}")
+                concurrent_results[name] = None
+            else:
+                concurrent_results[name] = res
+
+        logger.info(
+            f"✅ All tasks completed — LLM chunks: {len(content_chunks)}, "
+            f"function_calls: {len(function_calls)}, "
+            f"concurrent results: {list(concurrent_results.keys())}"
+        )
+
+        # ── Yield collected LLM content chunks ──
+        for chunk in content_chunks:
+            yield chunk
+
+        # ── Process tool calls if any ──
         if function_calls:
             # Add assistant message with tool calls to conversation
             tool_calls = []
 
             for func_call in function_calls:
-                tool_calls.append({
-                    "id": func_call.get("id", f"call_{func_call['name']}"),
-                    "type": "function",
-                    "function": {
-                        "name": func_call["name"],
-                        "arguments": str(func_call["arguments"]) if isinstance(func_call["arguments"], dict) else func_call["arguments"]
+                tool_calls.append(
+                    {
+                        "id": func_call.get("id", f"call_{func_call['name']}"),
+                        "type": "function",
+                        "function": {
+                            "name": func_call["name"],
+                            "arguments": (
+                                str(func_call["arguments"])
+                                if isinstance(func_call["arguments"], dict)
+                                else func_call["arguments"]
+                            ),
+                        },
                     }
-                })
+                )
 
             assistant_message: ChatCompletionMessageParam = {
                 "role": "assistant",
                 "content": None,
-                "tool_calls": tool_calls
+                "tool_calls": tool_calls,
             }
             messages.append(assistant_message)
 
@@ -246,25 +338,24 @@ class MCPClient:
                 tool_name = func_call["name"]
                 tool_args = func_call["arguments"]
 
-                # Inject auth info if available
-                if auth_info:
-                    if isinstance(tool_args, str):
-                        try:
-                            args_dict = json.loads(tool_args)
-                            args_dict["__auth_info"] = auth_info
-                            tool_args = args_dict
-                        except json.JSONDecodeError:
-                            logger.warning(f"Failed to parse tool arguments as JSON: {tool_args}")
-                    elif isinstance(tool_args, dict):
-                        tool_args["__auth_info"] = auth_info
-                    else:
-                        logger.warning(f"Tool arguments are not dict or string: {type(tool_args)}")
+                # ── Apply argument enhancer if provided ──
+                if tool_args_enhancer:
+                    try:
+                        tool_args = tool_args_enhancer(
+                            tool_name, tool_args, concurrent_results
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Argument enhancer failed for {tool_name}: {e}"
+                        )
 
                 # Find which server has this tool
                 if tool_name in tool_to_server_map:
                     server_name, session = tool_to_server_map[tool_name]
                     logger.info(
-                        f"⚙️  Executing tool: {tool_name} on server '{server_name}' with args: {tool_args}")
+                        f"⚙️  Executing tool: {tool_name} on server '{server_name}' "
+                        f"with args: {tool_args}"
+                    )
 
                     # Execute tool call on the appropriate server
                     result = await session.call_tool(tool_name, tool_args)
@@ -283,8 +374,3 @@ class MCPClient:
                     yield ChatCompletionStreamResponseType(
                         type=ChatCompletionTypeEnum.DATA,
                         data=tool_results)
-
-    async def cleanup(self):
-        """Clean up resources"""
-        await self.exit_stack.aclose()
-        await self.http_client.aclose()
