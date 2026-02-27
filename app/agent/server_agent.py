@@ -276,7 +276,7 @@ class AgentServer:
                 data=str(llm_result),
             )
             return
-        
+
         # Check if llm_result is a tuple or list as expected
         if isinstance(llm_result, (tuple, list)) and len(llm_result) == 2:
             content_chunks, function_calls = llm_result

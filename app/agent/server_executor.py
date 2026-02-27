@@ -21,7 +21,8 @@ from a2a.types import (
     DataPart,
     UnsupportedOperationError,
     Role,
-    TaskArtifactUpdateEvent
+    TaskArtifactUpdateEvent,
+    TaskStatusUpdateEvent,
 )
 from a2a.utils.errors import ServerError
 from a2a.utils import new_agent_text_message, new_task
@@ -30,6 +31,7 @@ from openai.types.chat import ChatCompletionMessageParam
 
 from app.auth import get_google_creds, store_google_creds, create_session_token, verify_session_token
 from .server_agent import AgentServer
+from app.config.settings import BaseConfig
 from app.remote_agents import RoutingAgent
 from app.utils.logger import logger
 
@@ -203,38 +205,62 @@ class CalendarAgentExecutor(AgentExecutor):
         return None
 
     async def _call_datetime_parser(self, user_query: str) -> dict | None:
-        """Call the remote datetime-parser agent and return the parsed result."""
+        """Call the remote datetime-parser agent and return the parsed result.
+
+        Returns:
+            On success: ``{"time_range": {...}}`` (the ``datetime_parser`` payload).
+            On error  : ``{"error": "<message>"}`` so the caller can propagate it.
+            If the agent is unavailable: ``None``.
+        """
         if not self._routing_agent:
             return None
 
-        # Find a datetime-related agent by name
-        datetime_agent_name = None
-        for name in self._routing_agent.agents_info:
-            if "datetime" in name.lower():
-                datetime_agent_name = name
-                break
+        # Use the configured agent name from settings
+        datetime_agent_name = BaseConfig.DATETIME_PARSER_AGENT
         if not datetime_agent_name:
-            # logger.warning("Datetime parser agent not found in routing agent")
+            logger.warning("DATETIME_PARSER_AGENT not configured in settings")
+            return None
+
+        if datetime_agent_name not in self._routing_agent.agents_info:
+            logger.warning(f"Datetime parser agent '{datetime_agent_name}' not found in routing agent")
             return None
 
         try:
             datetime_result = None
+            error_message = None
+
             async for event in self._routing_agent.request(datetime_agent_name, user_query, metadata={"single_time_mode": False}):
                 if isinstance(event, TaskArtifactUpdateEvent):
                     if event.artifact and event.artifact.parts:
                         for part in event.artifact.parts:
                             if hasattr(part, "root") and hasattr(part.root, "data"):
                                 data = part.root.data
-                                if isinstance(data, dict):
-                                    if "datetime_parser" in data:
-                                        datetime_result = data["datetime_parser"]
-                                    elif "parsable" in data:
-                                        datetime_result = data
-            logger.info(f"📅 Datetime parser result: {datetime_result}")
-            return datetime_result
+                                if isinstance(data, dict) and "datetime_parser" in data:
+                                    datetime_result = data["datetime_parser"]
+                elif isinstance(event, TaskStatusUpdateEvent):
+                    # Capture error/status messages when no artifact is produced
+                    if (
+                        event.status
+                        and event.status.message
+                        and event.status.message.parts
+                    ):
+                        for part in event.status.message.parts:
+                            if hasattr(part, "root") and hasattr(part.root, "text") and part.root.text:
+                                error_message = part.root.text
+
+            if datetime_result:
+                logger.info(f"📅 Datetime parser result: {datetime_result}")
+                return datetime_result
+
+            # No artifact received – treat the status message as an error
+            if error_message:
+                logger.warning(f"📅 Datetime parser returned error: {error_message}")
+                return {"error": error_message}
+
+            return None
         except Exception as e:
             logger.error(f"Failed to call datetime parser agent: {e}")
-            return None
+            return {"error": str(e)}
 
     def _build_concurrent_tasks(
         self, messages: List[ChatCompletionMessageParam]
@@ -267,17 +293,21 @@ class CalendarAgentExecutor(AgentExecutor):
         if not isinstance(tool_args, dict):
             return tool_args
 
-        # 1. Merge datetime_parser for all time-aware tools
-        DATETIME_AWARE_TOOLS = {
-            "list_calendar_events",
-            "add_calendar_event",
-            "update_calendar_event",
-            "search_calendar_events",
-        }
+        # 1. Pass datetime_parser (or its error message) to every tool.
+        #    Each tool's run() decides whether it needs the parsed data.
         datetime_result = concurrent_results.get("datetime_parser")
-        if datetime_result and tool_name in DATETIME_AWARE_TOOLS:
-            tool_args["datetime_parser"] = datetime_result
-            logger.info(f"📅 Merged datetime_parser into {tool_name} args")
+        if datetime_result:
+            if isinstance(datetime_result, dict) and "error" in datetime_result:
+                # Parser returned an error — pass the message so the
+                # tool can log it or decide to ignore it.
+                tool_args["datetime_parser_message"] = datetime_result["error"]
+                logger.info(
+                    f"📅 Passing datetime_parser_message to {tool_name}: "
+                    f"{datetime_result['error']}"
+                )
+            else:
+                tool_args["datetime_parser"] = datetime_result
+                logger.info(f"📅 Merged datetime_parser into {tool_name} args")
 
         # 2. Merge auth_info
         if auth_info:
@@ -363,13 +393,11 @@ class CalendarAgentExecutor(AgentExecutor):
                 if response["type"] == ChatCompletionTypeEnum.CONTENT:
                     if response["data"]:
                         await updater.update_status(
-                            TaskState.working,
+                            TaskState.completed,
                             new_agent_text_message(response["data"], task.context_id, task.id)
                         )
-                        await updater.add_artifact([Part(root=TextPart(text=response["data"]))], name="Text Response")
 
                 elif response["type"] == ChatCompletionTypeEnum.DATA:
-                    # Check for tool results
                     data = response.get("data", {})
                     if not data:
                         continue
@@ -387,20 +415,16 @@ class CalendarAgentExecutor(AgentExecutor):
                             auth_error = True
                             break  # Stop processing if auth error found
 
-                        # Normal processing
+                        # structuredContent → artifact
                         if tool_result and tool_result.structuredContent:
-                            await updater.add_artifact([Part(root=DataPart(data={tool_name: tool_result.structuredContent}, kind="data", metadata=None))], name=f"{tool_name} Data")
-                            combined_response_text.append(f"I have retrieved data for {tool_name}.")
+                            await updater.add_artifact(
+                                [Part(root=DataPart(data={tool_name: tool_result.structuredContent}, kind="data", metadata=None))],
+                                name=f"{tool_name} Data"
+                            )
+                        # text content → text message (no artifact)
                         elif tool_result:
-                            # For text results, we add it as an artifact.
-                            # We only include it in the message if it is short (< 200 chars), otherwise we summarize.
-                            await updater.add_artifact([Part(root=TextPart(text=f"{tool_name}: {content_text}"))], name=f"{tool_name} Response")
-
-                            if len(content_text) < 200:
-                                combined_response_text.append(content_text.strip())
-                            else:
-                                combined_response_text.append(
-                                    f"I received a response from {tool_name} (see '{tool_name} Response' artifact for details).")
+                            if content_text.strip():
+                                combined_response_text.append(content_text)
                         else:
                             combined_response_text.append(f"No result from {tool_name}")
 
@@ -409,7 +433,7 @@ class CalendarAgentExecutor(AgentExecutor):
                         final_message = " ".join(combined_response_text)
                         await updater.update_status(
                             TaskState.completed,
-                            new_agent_text_message(final_message, task.context_id, task.id)
+                            new_agent_text_message(final_message, task.context_id, task.id) if final_message.strip() else None
                         )
 
                     if auth_error:

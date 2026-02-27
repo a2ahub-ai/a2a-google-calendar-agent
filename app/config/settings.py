@@ -39,3 +39,4 @@ class BaseConfig:
     PROFILE: str = os.environ.get("PROFILE", "default")
     AUTO_AUTH_MODE: bool = boolean_parser(os.environ.get("AUTO_AUTH_MODE", "false"))
     REMOTE_AGENT_ADDRESSES: str = os.environ.get("REMOTE_AGENT_ADDRESSES", "")
+    DATETIME_PARSER_AGENT: str = os.environ.get("DATETIME_PARSER_AGENT", "")

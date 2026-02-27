@@ -10,6 +10,7 @@ from app.config.settings import BaseConfig
 from fastmcp import FastMCP
 from fastmcp.tools import Tool
 from fastmcp.tools.tool import ToolResult
+from mcp.types import TextContent
 
 from app.utils.logger import logger
 
@@ -30,32 +31,6 @@ def _format_timezone_offset(tz_offset: int | float) -> str:
     hours = int(abs_offset)
     minutes = int((abs_offset - hours) * 60)
     return f"{sign}{hours:02d}:{minutes:02d}"
-
-
-def _get_timezone_name(tz_offset: int | float) -> str:
-    """Return an IANA-compatible fixed-offset timezone string for the Google Calendar API.
-
-    For common offsets this returns a well-known IANA name; otherwise it falls
-    back to 'Etc/GMT{±N}' (note the sign inversion per IANA convention).
-    """
-    _COMMON: Dict[int, str] = {
-        -12: 'Etc/GMT+12', -11: 'Pacific/Midway', -10: 'Pacific/Honolulu',
-        -9: 'America/Anchorage', -8: 'America/Los_Angeles', -7: 'America/Denver',
-        -6: 'America/Chicago', -5: 'America/New_York', -4: 'America/Halifax',
-        -3: 'America/Sao_Paulo', -2: 'Atlantic/South_Georgia', -1: 'Atlantic/Azores',
-        0: 'UTC', 1: 'Europe/London', 2: 'Europe/Berlin', 3: 'Europe/Moscow',
-        4: 'Asia/Dubai', 5: 'Asia/Karachi', 6: 'Asia/Dhaka',
-        7: 'Asia/Bangkok', 8: 'Asia/Shanghai', 9: 'Asia/Tokyo',
-        10: 'Australia/Sydney', 11: 'Pacific/Noumea', 12: 'Pacific/Auckland',
-    }
-    int_offset = int(tz_offset) if tz_offset == int(tz_offset) else None
-    if int_offset is not None and int_offset in _COMMON:
-        return _COMMON[int_offset]
-    # Fallback: Etc/GMT uses inverted sign
-    if int_offset is not None:
-        inverted = -int_offset
-        return f"Etc/GMT{'+' if inverted >= 0 else ''}{inverted}"
-    return 'UTC'
 
 
 def _ensure_rfc3339(dt_str: Optional[str], tz_offset: int | float | None = None) -> Optional[str]:
@@ -84,12 +59,15 @@ def _extract_datetime_range(arguments: Dict[str, Any]) -> tuple[Optional[str], O
     The datetime_parser is injected by the executor from the remote
     a2a-datetime-parser-agent (single_time_mode=False).  Its format is:
         {
-            "parsable": true,
             "time_range": {
-                "start_date": {"datetime": "2026-02-26T00:00:00"},
-                "end_date":   {"datetime": "2026-02-26T23:59:59"}
+                "start_date": {"datetime": "2026-02-27T12:00:00"},
+                "end_date":   {"datetime": "2026-02-27T12:59:59"}
             }
         }
+
+    The datetime_parser data is **optional** for every tool.  If it is
+    absent or malformed the caller is expected to fall back to its own
+    default time range.
 
     Returns (time_min, time_max, tz_offset) – RFC 3339-compliant timestamps
     (with timezone) or None, plus the numeric timezone offset.
@@ -101,7 +79,7 @@ def _extract_datetime_range(arguments: Dict[str, Any]) -> tuple[Optional[str], O
     tz_offset: int | float | None = arguments.get('__timezone')
 
     datetime_parser = arguments.get('datetime_parser')
-    if datetime_parser and isinstance(datetime_parser, dict) and datetime_parser.get('parsable'):
+    if datetime_parser and isinstance(datetime_parser, dict):
         time_range = datetime_parser.get('time_range')
         if time_range and isinstance(time_range, dict):
             start_date = time_range.get('start_date')
@@ -161,8 +139,9 @@ class ListCalendarEvents(Tool):
         auth_info = arguments.get("__auth_info")
         if not auth_info:
             return ToolResult(
-                content=[{"type": "text", "text": "Error: Missing authorization information. Please authenticate first."}]
-            )
+                content=TextContent(
+                    type="text",
+                    text="Error: Missing authorization information. Please authenticate first."))
 
         try:
             service = _get_calendar_service(auth_info)
@@ -191,17 +170,17 @@ class ListCalendarEvents(Tool):
             events = events_result.get('items', [])
 
             if not events:
-                return ToolResult(content=[{"type": "text", "text": "No events found in the specified time range."}])
+                return ToolResult(content=TextContent(type="text", text="No events found in the specified time range."))
 
             formatted = [_format_event_summary(e) for e in events]
             return ToolResult(
                 structured_content=events,
-                content=[{"type": "text", "text": "\n".join(formatted)}],
+                content=TextContent(type="text", text="\n".join(formatted)),
             )
 
         except Exception as e:
             sys.stderr.write(f"[calendar-mcp] list error: {e}\n")
-            return ToolResult(content=[{"type": "text", "text": f"Error retrieving calendar events: {str(e)}"}])
+            return ToolResult(content=TextContent(type="text", text=f"Error retrieving calendar events: {str(e)}"))
 
 
 mcp.add_tool(ListCalendarEvents())
@@ -255,14 +234,14 @@ class AddCalendarEvent(Tool):
 
         auth_info = arguments.get("__auth_info")
         if not auth_info:
-            return ToolResult(content=[{"type": "text", "text": "Error: Missing authorization information."}])
+            return ToolResult(content=TextContent(type="text", text="Error: Missing authorization information."))
 
         try:
             service = _get_calendar_service(auth_info)
 
             # Get times exclusively from datetime_parser
             start_time, end_time, tz_offset = _extract_datetime_range(arguments)
-            tz_name = _get_timezone_name(tz_offset) if tz_offset is not None else 'UTC'
+            tz_str = _format_timezone_offset(tz_offset) if tz_offset is not None else '+00:00'
 
             # If still missing times, default to now + 1 hour
             if not start_time:
@@ -283,8 +262,8 @@ class AddCalendarEvent(Tool):
 
             event_body: Dict[str, Any] = {
                 'summary': arguments.get('summary', 'Untitled Event'),
-                'start': {'dateTime': start_time, 'timeZone': tz_name},
-                'end': {'dateTime': end_time, 'timeZone': tz_name},
+                'start': {'dateTime': start_time, 'timeZone': tz_str},
+                'end': {'dateTime': end_time, 'timeZone': tz_str},
             }
 
             if arguments.get('description'):
@@ -298,13 +277,14 @@ class AddCalendarEvent(Tool):
 
             created = service.events().insert(calendarId='primary', body=event_body).execute()
             return ToolResult(
-                structured_content=created,
-                content=[{"type": "text", "text": f"Event created: {created.get('summary')} | Link: {created.get('htmlLink')}"}],
-            )
+                structured_content=created, content=TextContent(
+                    type="text", text=f"Event created: {
+                        created.get('summary')} | Link: {
+                        created.get('htmlLink')}"))
 
         except Exception as e:
             sys.stderr.write(f"[calendar-mcp] add error: {e}\n")
-            return ToolResult(content=[{"type": "text", "text": f"Error creating event: {str(e)}"}])
+            return ToolResult(content=TextContent(type="text", text=f"Error creating event: {str(e)}"))
 
 
 mcp.add_tool(AddCalendarEvent())
@@ -363,11 +343,11 @@ class UpdateCalendarEvent(Tool):
 
         auth_info = arguments.get("__auth_info")
         if not auth_info:
-            return ToolResult(content=[{"type": "text", "text": "Error: Missing authorization information."}])
+            return ToolResult(content=TextContent(type="text", text="Error: Missing authorization information."))
 
         event_id = arguments.get('event_id')
         if not event_id:
-            return ToolResult(content=[{"type": "text", "text": "Error: event_id is required to update an event."}])
+            return ToolResult(content=TextContent(type="text", text="Error: event_id is required to update an event."))
 
         try:
             service = _get_calendar_service(auth_info)
@@ -385,24 +365,24 @@ class UpdateCalendarEvent(Tool):
 
             # Time updates from datetime_parser
             start_time, end_time, tz_offset = _extract_datetime_range(arguments)
-            tz_name = _get_timezone_name(tz_offset) if tz_offset is not None else None
+            tz_str = _format_timezone_offset(tz_offset) if tz_offset is not None else None
 
             if start_time:
                 existing['start'] = {
                     'dateTime': start_time,
-                    'timeZone': tz_name or existing.get(
+                    'timeZone': tz_str or existing.get(
                         'start',
                         {}).get(
                         'timeZone',
-                        'UTC')}
+                        '+00:00')}
             if end_time:
                 existing['end'] = {
                     'dateTime': end_time,
-                    'timeZone': tz_name or existing.get(
+                    'timeZone': tz_str or existing.get(
                         'end',
                         {}).get(
                         'timeZone',
-                        'UTC')}
+                        '+00:00')}
 
             if arguments.get('attendees'):
                 existing['attendees'] = [{'email': e} for e in arguments['attendees']]
@@ -420,7 +400,7 @@ class UpdateCalendarEvent(Tool):
 
         except Exception as e:
             sys.stderr.write(f"[calendar-mcp] update error: {e}\n")
-            return ToolResult(content=[{"type": "text", "text": f"Error updating event: {str(e)}"}])
+            return ToolResult(content=TextContent(type="text", text=f"Error updating event: {str(e)}"))
 
 
 mcp.add_tool(UpdateCalendarEvent())
@@ -453,11 +433,11 @@ class DeleteCalendarEvent(Tool):
 
         auth_info = arguments.get("__auth_info")
         if not auth_info:
-            return ToolResult(content=[{"type": "text", "text": "Error: Missing authorization information."}])
+            return ToolResult(content=TextContent(type="text", text="Error: Missing authorization information."))
 
         event_id = arguments.get('event_id')
         if not event_id:
-            return ToolResult(content=[{"type": "text", "text": "Error: event_id is required to delete an event."}])
+            return ToolResult(content=TextContent(type="text", text="Error: event_id is required to delete an event."))
 
         try:
             service = _get_calendar_service(auth_info)
@@ -473,12 +453,12 @@ class DeleteCalendarEvent(Tool):
 
             return ToolResult(
                 structured_content={"deleted": True, "event_id": event_id, "summary": event_name},
-                content=[{"type": "text", "text": f"Event '{event_name}' has been deleted successfully."}],
+                content=TextContent(type="text", text=f"Event '{event_name}' has been deleted successfully."),
             )
 
         except Exception as e:
             sys.stderr.write(f"[calendar-mcp] delete error: {e}\n")
-            return ToolResult(content=[{"type": "text", "text": f"Error deleting event: {str(e)}"}])
+            return ToolResult(content=TextContent(type="text", text=f"Error deleting event: {str(e)}"))
 
 
 mcp.add_tool(DeleteCalendarEvent())
@@ -516,11 +496,11 @@ class SearchCalendarEvents(Tool):
 
         auth_info = arguments.get("__auth_info")
         if not auth_info:
-            return ToolResult(content=[{"type": "text", "text": "Error: Missing authorization information."}])
+            return ToolResult(content=TextContent(type="text", text="Error: Missing authorization information."))
 
         query = arguments.get('query', '')
         if not query:
-            return ToolResult(content=[{"type": "text", "text": "Error: A search query is required."}])
+            return ToolResult(content=TextContent(type="text", text="Error: A search query is required."))
 
         try:
             service = _get_calendar_service(auth_info)
@@ -552,17 +532,21 @@ class SearchCalendarEvents(Tool):
             events = events_result.get('items', [])
 
             if not events:
-                return ToolResult(content=[{"type": "text", "text": f"No events found matching '{query}'."}])
+                return ToolResult(content=TextContent(type="text", text=f"No events found matching '{query}'."))
 
             formatted = [_format_event_summary(e) for e in events]
             return ToolResult(
                 structured_content=events,
-                content=[{"type": "text", "text": f"Found {len(events)} event(s) matching '{query}':\n" + "\n".join(formatted)}],
+                content=TextContent(
+                    type="text",
+                    text=f"Found {
+                        len(events)} event(s) matching '{query}':\n" +
+                    "\n".join(formatted)),
             )
 
         except Exception as e:
             sys.stderr.write(f"[calendar-mcp] search error: {e}\n")
-            return ToolResult(content=[{"type": "text", "text": f"Error searching events: {str(e)}"}])
+            return ToolResult(content=TextContent(type="text", text=f"Error searching events: {str(e)}"))
 
 
 mcp.add_tool(SearchCalendarEvents())

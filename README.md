@@ -32,9 +32,11 @@ A calendar agent that retrieves events and reminders using the Google Calendar A
     cp .env.example .env
     ```
 
-    Edit `.env` and provide your API keys:
+    Edit `.env` and provide your API keys and configuration:
     - `OPENAI_API_KEY` or `GROQ_API_KEY`: Required for the LLM.
     - `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: Required for Google Calendar OAuth.
+    - `REMOTE_AGENT_ADDRESSES`: Comma-separated list of remote agent URLs (e.g., `http://localhost:10001`).
+    - `DATETIME_PARSER_AGENT`: Name of the datetime parser agent.
 
     *Note: Ensure your Google Cloud OAuth consent screen is configured and the redirect URI `http://localhost:10010/auth/callback` is added to your OAuth client credentials.*
 
