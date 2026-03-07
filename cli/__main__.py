@@ -179,6 +179,11 @@ class OAuthClient:
     default='',
     help='Comma-separated list of extension URIs to enable (sets X-A2A-Extensions header).',
 )
+@click.option(
+    '--metadata',
+    multiple=True,
+    help='Key-value pairs for metadata (key=value).',
+)
 async def cli(
     agent,
     bearer_token,
@@ -190,8 +195,27 @@ async def cli(
     header,
     automatic_authentication: bool,
     enabled_extensions,
+    metadata,
 ):
     headers = {h.split('=')[0]: h.split('=')[1] for h in header}
+    metadata_dict = {}
+    if metadata:
+        for m in metadata:
+            key, value = m.split('=', 1)
+            # Type conversion logic
+            if value.lower() == 'true':
+                value = True
+            elif value.lower() == 'false':
+                value = False
+            else:
+                try:
+                    if '.' in value:
+                        value = float(value)
+                    else:
+                        value = int(value)
+                except ValueError:
+                    pass  # Keep as string
+            metadata_dict[key] = value
 
     # Auth Logic
     if bearer_token:
@@ -281,6 +305,7 @@ async def cli(
                 None,
                 context_id,
                 profile,
+                metadata_dict,
             )
 
             if history and continue_loop:
@@ -304,7 +329,11 @@ async def completeTask(
     task_id,
     context_id,
     profile="default",
+    metadata_dict=None,
 ):
+    if metadata_dict is None:
+        metadata_dict = {'timezone': 7}  # Default if not provided
+
     prompt_text = await click.prompt(
         '\nWhat do you want to send to the agent? (:q or quit to exit)'
     )
@@ -343,7 +372,7 @@ async def completeTask(
         configuration=MessageSendConfiguration(
             accepted_output_modes=['text'],
         ),
-        metadata={'timezone': 7},
+        metadata=metadata_dict,
     )
 
     if use_push_notifications:
@@ -463,6 +492,8 @@ async def completeTask(
                     notification_receiver_port,
                     task_id,
                     context_id,
+                    profile,
+                    metadata_dict,
                 ),
                 context_id,
                 task_id,

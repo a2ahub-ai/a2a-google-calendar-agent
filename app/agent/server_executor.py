@@ -52,6 +52,7 @@ class CalendarAgentExecutor(AgentExecutor):
         self._active_sessions: set[str] = set()
         self._awaiting_auth = {}
         self._credentials = {}
+        self._remote_token_usage = {}
 
     async def on_auth_callback(self, state: str, url: str):
         if state not in self._awaiting_auth:
@@ -235,8 +236,11 @@ class CalendarAgentExecutor(AgentExecutor):
                         for part in event.artifact.parts:
                             if hasattr(part, "root") and hasattr(part.root, "data"):
                                 data = part.root.data
-                                if isinstance(data, dict) and "datetime_parser" in data:
-                                    datetime_result = data["datetime_parser"]
+                                if isinstance(data, dict):
+                                    if "datetime_parser" in data:
+                                        datetime_result = data["datetime_parser"]
+                                    if "token_usage" in data:
+                                        self._remote_token_usage = data["token_usage"]
                 elif isinstance(event, TaskStatusUpdateEvent):
                     # Capture error/status messages when no artifact is produced
                     if (
@@ -315,7 +319,7 @@ class CalendarAgentExecutor(AgentExecutor):
 
         # 3. Merge timezone
         if timezone is not None:
-            tool_args["__timezone"] = timezone
+            tool_args["timezone_offset"] = timezone
 
         return tool_args
 
@@ -338,6 +342,8 @@ class CalendarAgentExecutor(AgentExecutor):
                 timezone_offset = context._params.metadata['timezone']
                 logger.info(f"Timezone offset from metadata: {timezone_offset}")
 
+        self._remote_token_usage = {}
+
         query = context.get_user_input()
         task = context.current_task
 
@@ -355,7 +361,8 @@ class CalendarAgentExecutor(AgentExecutor):
         logger.debug(f"User ID: {user_id}")
 
         # Convert task history to messages
-        messages = self._convert_task_history_to_messages(task.history)
+        # messages = self._convert_task_history_to_messages(task.history)
+        messages = []
         if not messages and query:
             messages.append(cast(ChatCompletionMessageParam, {
                 "role": "user",
@@ -461,8 +468,31 @@ class CalendarAgentExecutor(AgentExecutor):
                             return
 
                 elif response["type"] == ChatCompletionTypeEnum.DONE:
-                    # If we reach here successfully, we are done
-                    pass
+                    # Capture local token usage
+                    input_tokens = response.get("input_tokens") or 0
+                    output_tokens = response.get("output_tokens") or 0
+                    logger.info(f"LLM token usage - input: {input_tokens}, output: {output_tokens}")
+
+                    remote_input = 0
+                    remote_output = 0
+                    if self._remote_token_usage:
+                        remote_input = self._remote_token_usage.get("input_tokens", 0)
+                        remote_output = self._remote_token_usage.get("output_tokens", 0)
+                        logger.info(f"Remote agent token usage - input: {remote_input}, output: {remote_output}")
+
+                    total_input = input_tokens + remote_input
+                    total_output = output_tokens + remote_output
+
+                    if total_input > 0 or total_output > 0:
+                        await updater.add_artifact(
+                            [Part(root=DataPart(data={
+                                "token_usage": {
+                                    "input_tokens": total_input,
+                                    "output_tokens": total_output,
+                                }
+                            }, kind="data", metadata=None))],
+                            name="token_usage"
+                        )
 
             if retry_needed:
                 continue

@@ -13,7 +13,5 @@ class ChatCompletionTypeEnum(Enum):
 
 AGENT_DESCRIPTION = (
     "A Google Calendar assistant that can list, create, update, delete, "
-    "and search calendar events. It understands natural language time "
-    "expressions (e.g. 'tomorrow', 'next Monday', 'this week') and "
-    "translates them into precise time ranges via a remote datetime-parser agent."
+    "and search calendar events."
 )

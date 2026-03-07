@@ -2,7 +2,7 @@
 import asyncio
 import json
 from contextlib import AsyncExitStack
-from typing import AsyncGenerator, List, Dict, Any, Awaitable, Callable, cast
+from typing import AsyncGenerator, List, Dict, Any, Awaitable, Callable, cast, Optional
 from openai.types import ResponseFormatJSONSchema
 from openai.types.shared.response_format_json_schema import JSONSchema
 
@@ -187,11 +187,6 @@ class AgentServer:
         logger.info("🚀 Processing new query")
 
         instruction = AGENT_DESCRIPTION + "\n"
-        instruction += (
-            "You are not permitted to answer any user questions beyond your "
-            "primary task, if a user asks you, simply notify them that you do "
-            "not have sufficient information to answer that question."
-        )
         system_message: ChatCompletionMessageParam = {
             "role": "system",
             "content": instruction,
@@ -225,10 +220,12 @@ class AgentServer:
         )
 
         # ── Run LLM + concurrent tasks SIMULTANEOUSLY ──
-        async def _collect_llm() -> tuple[list[ChatCompletionStreamResponseType], list]:
-            """Consume the LLM stream and return (content_chunks, function_calls)."""
+        async def _collect_llm() -> tuple[list[ChatCompletionStreamResponseType],
+                                          list[Any], Optional[ChatCompletionStreamResponseType]]:
+            """Consume the LLM stream and return (content_chunks, function_calls, done_chunk)."""
             chunks: list[ChatCompletionStreamResponseType] = []
             fn_calls: list = []
+            done_chunk: Optional[ChatCompletionStreamResponseType] = None
             async for rc in self.llm.chat_completion(
                 messages=messages,
                 tools=available_tools,
@@ -249,8 +246,9 @@ class AgentServer:
                         fn_calls = rc["data"]["function"]
                         logger.info(f"🔧 LLM requested {len(fn_calls)} tool call(s)")
                 elif rc["type"] == ChatCompletionTypeEnum.DONE:
+                    done_chunk = rc
                     break
-            return chunks, fn_calls
+            return chunks, fn_calls, done_chunk
 
         # Build the list of awaitables: LLM first, then any concurrent tasks.
         task_names: list[str] = []
@@ -278,11 +276,11 @@ class AgentServer:
             return
 
         # Check if llm_result is a tuple or list as expected
-        if isinstance(llm_result, (tuple, list)) and len(llm_result) == 2:
-            content_chunks, function_calls = llm_result
+        if isinstance(llm_result, (tuple, list)) and len(llm_result) == 3:
+            content_chunks, function_calls, done_chunk = llm_result
         else:
             logger.error(f"Unexpected LLM result format: {llm_result}")
-            content_chunks, function_calls = [], []
+            content_chunks, function_calls, done_chunk = [], [], None
 
         # Unpack concurrent-task results into a name→result dict.
         concurrent_results: Dict[str, Any] = {}
@@ -304,6 +302,15 @@ class AgentServer:
         # ── Yield collected LLM content chunks ──
         for chunk in content_chunks:
             yield chunk
+
+        # Yield DONE event with token usage
+        if done_chunk:
+            yield ChatCompletionStreamResponseType(
+                type=ChatCompletionTypeEnum.DONE,
+                data=None,
+                input_tokens=done_chunk.get("input_tokens"),
+                output_tokens=done_chunk.get("output_tokens"),
+            )
 
         # ── Process tool calls if any ──
         if function_calls:

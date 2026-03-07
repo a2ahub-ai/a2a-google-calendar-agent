@@ -7,6 +7,14 @@ import contextlib
 import base64
 import json
 
+from app.agent.server_mcp import (
+    ListCalendarEvents,
+    AddCalendarEvent,
+    UpdateCalendarEvent,
+    DeleteCalendarEvent,
+    GetEventDetails,
+)
+
 # Force UTF-8 encoding for Windows to handle Vietnamese characters
 if sys.platform == 'win32':
     # Set environment variable for subprocesses
@@ -85,10 +93,11 @@ class SessionJWTAuthBackend(AuthenticationBackend):
 
 
 async def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
-    skill = AgentSkill(
+    list_calendar_events = ListCalendarEvents()
+    list_calendar_events_skill = AgentSkill(
         id=BaseConfig.AGENT_ID,
-        name="Calendar Skill",
-        description="A skill for retrieving calendar events and reminders for today.",
+        name=f"{list_calendar_events.name} Skill",
+        description=f"{list_calendar_events.description}",
         tags=[
             "calendar",
             "events",
@@ -96,9 +105,85 @@ async def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
             "schedule"],
         examples=[
             "tell me my events today",
-            "what's on my calendar today",
-            "summarize my reminders today",
-            "show me today's schedule"]
+            "show me today's schedule",
+            "list my calendar events for tomorrow",
+        ],
+    )
+
+    add_calendar_event = AddCalendarEvent()
+    add_calendar_event_skill = AgentSkill(
+        id=f"{BaseConfig.AGENT_ID}-add",
+        name=f"{add_calendar_event.name} Skill",
+        description=f"{add_calendar_event.description}",
+        tags=[
+            "calendar",
+            "events",
+            "create",
+            "add",
+            "schedule"
+        ],
+        examples=[
+            "schedule a meeting tomorrow at 2pm",
+            "add a dentist appointment for next Friday",
+            "create an event called Team Standup"
+        ],
+    )
+
+    update_calendar_event = UpdateCalendarEvent()
+    update_calendar_event_skill = AgentSkill(
+        id=f"{BaseConfig.AGENT_ID}-update",
+        name=f"{update_calendar_event.name} Skill",
+        description=f"{update_calendar_event.description}",
+        tags=[
+            "calendar",
+            "events",
+            "update",
+            "modify",
+            "change"
+        ],
+        examples=[
+            "move my 2pm meeting to 3pm",
+            "rename the Team Standup event",
+            "change location of meeting"
+        ],
+    )
+
+    delete_calendar_event = DeleteCalendarEvent()
+    delete_calendar_event_skill = AgentSkill(
+        id=f"{BaseConfig.AGENT_ID}-delete",
+        name=f"{delete_calendar_event.name} Skill",
+        description=f"{delete_calendar_event.description}",
+        tags=[
+            "calendar",
+            "events",
+            "delete",
+            "remove",
+            "cancel"
+        ],
+        examples=[
+            "cancel my meeting at 2pm",
+            "delete the Team Standup event",
+            "remove the dentist appointment"
+        ],
+    )
+
+    get_event_details = GetEventDetails()
+    get_event_details_skill = AgentSkill(
+        id=f"{BaseConfig.AGENT_ID}-get-details",
+        name=f"{get_event_details.name} Skill",
+        description=f"{get_event_details.description}",
+        tags=[
+            "calendar",
+            "events",
+            "details",
+            "information",
+            "query"
+        ],
+        examples=[
+            "get details for my 2pm meeting",
+            "show me the location of the Team Standup event",
+            "when is my next dentist appointment"
+        ],
     )
 
     # Define OAuth2 security scheme.
@@ -125,7 +210,13 @@ async def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
         default_input_modes=["text"],
         default_output_modes=["text"],
         capabilities=AgentCapabilities(streaming=True),
-        skills=[skill],
+        skills=[
+            list_calendar_events_skill,
+            add_calendar_event_skill,
+            update_calendar_event_skill,
+            delete_calendar_event_skill,
+            get_event_details_skill,
+        ],
         security_schemes={OAUTH_SCHEME_NAME: SecurityScheme(root=oauth_scheme)},
         # Declare that this scheme is required to use the agent's skills
         security=[
@@ -150,7 +241,7 @@ async def main(host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
                   "-X",
                   "utf8",
                   "app/agent/server_mcp.py"] if sys.platform == 'win32' else ["python",
-                                                                        "app/agent/server_mcp.py"]
+                                                                              "app/agent/server_mcp.py"]
     await runner.connect_to_stdio_server("calendar-agent", python_cmd)
 
     agent_executor = CalendarAgentExecutor(runner, agent_card, routing_agent=routing_agent)

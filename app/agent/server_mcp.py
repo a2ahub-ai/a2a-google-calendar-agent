@@ -76,7 +76,7 @@ def _extract_datetime_range(arguments: Dict[str, Any]) -> tuple[Optional[str], O
     time_max: Optional[str] = None
 
     # Extract timezone offset injected by the executor
-    tz_offset: int | float | None = arguments.get('__timezone')
+    tz_offset: int | float | None = arguments.get('timezone_offset')
 
     datetime_parser = arguments.get('datetime_parser')
     if datetime_parser and isinstance(datetime_parser, dict):
@@ -90,6 +90,12 @@ def _extract_datetime_range(arguments: Dict[str, Any]) -> tuple[Optional[str], O
                 time_max = end_date.get('datetime')
 
     return _ensure_rfc3339(time_min, tz_offset), _ensure_rfc3339(time_max, tz_offset), tz_offset
+
+
+def _filter_event_fields(event: Dict[str, Any]) -> Dict[str, Any]:
+    """Filter event dictionary to keep only essential fields."""
+    keep_keys = {'kind', 'id', 'status', 'summary', 'creator', 'start', 'end'}
+    return {k: v for k, v in event.items() if k in keep_keys}
 
 
 def _format_event_summary(event: Dict[str, Any]) -> str:
@@ -129,7 +135,11 @@ class ListCalendarEvents(Tool):
                 "type": "integer",
                 "description": "Maximum number of events to return. Default 10."
             },
+            "timezone_offset": {
+                "type": "number",
+            },
         },
+        "required": ["timezone_offset"],
         "additionalProperties": True,
     }
 
@@ -167,14 +177,19 @@ class ListCalendarEvents(Tool):
                 kwargs['timeMax'] = time_max
 
             events_result = service.events().list(**kwargs).execute()
+            logger.debug(f"Google Calendar API response: {events_result}")
             events = events_result.get('items', [])
 
             if not events:
                 return ToolResult(content=TextContent(type="text", text="No events found in the specified time range."))
 
             formatted = [_format_event_summary(e) for e in events]
+            filtered_events = [_filter_event_fields(e) for e in events]
             return ToolResult(
-                structured_content=events,
+                structured_content={
+                    "status": "success",
+                    "msg": f"Retrieved successfully {len(events)} event(s).",
+                    "events": filtered_events},
                 content=TextContent(type="text", text="\n".join(formatted)),
             )
 
@@ -224,8 +239,11 @@ class AddCalendarEvent(Tool):
                 "items": {"type": "string"},
                 "description": "Optional list of attendee email addresses."
             },
+            "timezone_offset": {
+                "type": "number",
+            },
         },
-        "required": ["summary"],
+        "required": ["summary", "timezone_offset"],
         "additionalProperties": True,
     }
 
@@ -277,7 +295,11 @@ class AddCalendarEvent(Tool):
 
             created = service.events().insert(calendarId='primary', body=event_body).execute()
             return ToolResult(
-                structured_content=created, content=TextContent(
+                structured_content={
+                    "status": "success",
+                    "msg": f"Event created successfully: {created.get('summary')}",
+                    "event": _filter_event_fields(created)
+                }, content=TextContent(
                     type="text", text=f"Event created: {
                         created.get('summary')} | Link: {
                         created.get('htmlLink')}"))
@@ -299,7 +321,8 @@ class UpdateCalendarEvent(Tool):
         "Update an existing calendar event. Requires the event ID. "
         "Use this for requests like 'move my 2pm meeting to 3pm', "
         "'rename the Team Standup event', 'change location of meeting', etc. "
-        "You can update the title, start/end time, description, location, or attendees."
+        "You can update the title, start/end time, description, location, or attendees. "
+        "Please use get_event_details to find the event ID before updating if you don't have it."
     )
     parameters: Dict[str, Any] = {
         "type": "object",
@@ -333,8 +356,11 @@ class UpdateCalendarEvent(Tool):
                 "items": {"type": "string"},
                 "description": "New list of attendee email addresses (replaces existing)."
             },
+            "timezone_offset": {
+                "type": "number",
+            },
         },
-        "required": ["event_id"],
+        "required": ["event_id", "timezone_offset"],
         "additionalProperties": True,
     }
 
@@ -394,7 +420,11 @@ class UpdateCalendarEvent(Tool):
             ).execute()
 
             return ToolResult(
-                structured_content=updated,
+                structured_content={
+                    "status": "success",
+                    "msg": f"Event updated successfully: {updated.get('summary')}",
+                    "event": _filter_event_fields(updated)
+                },
                 content=[{"type": "text", "text": f"Event updated: {updated.get('summary')} | Link: {updated.get('htmlLink')}"}],
             )
 
@@ -413,8 +443,7 @@ class DeleteCalendarEvent(Tool):
     name: str = "delete_calendar_event"
     description: str = (
         "Delete an event from the calendar. Requires the event ID. "
-        "Use this for requests like 'cancel my 3pm meeting', "
-        "'delete the Team Standup event', 'remove event', etc."
+        "Please use get_event_details to find the event ID before updating if you don't have it."
     )
     parameters: Dict[str, Any] = {
         "type": "object",
@@ -452,7 +481,13 @@ class DeleteCalendarEvent(Tool):
             service.events().delete(calendarId='primary', eventId=event_id).execute()
 
             return ToolResult(
-                structured_content={"deleted": True, "event_id": event_id, "summary": event_name},
+                # structured_content={"deleted": True, "event_id": event_id, "summary": event_name},
+                structured_content={
+                    "status": "success",
+                    "msg": f"Event '{event_name}' deleted successfully.",
+                    "event_id": event_id,
+                    "summary": event_name
+                },
                 content=TextContent(type="text", text=f"Event '{event_name}' has been deleted successfully."),
             )
 
@@ -465,14 +500,14 @@ mcp.add_tool(DeleteCalendarEvent())
 
 
 # ─────────────────────────────────────────────
-#  5. Search Calendar Events
+#  5. Get Detailed Event Information
 # ─────────────────────────────────────────────
-class SearchCalendarEvents(Tool):
-    name: str = "search_calendar_events"
+class GetEventDetails(Tool):
+    name: str = "get_event_details"
     description: str = (
-        "Search for calendar events by keyword/query text. "
-        "Use this for requests like 'find all meetings with John', "
-        "'search for standup events', 'do I have a dentist appointment', etc. "
+        "Get detailed information about a specific calendar event. "
+        "Use this for requests like 'get details for my 2pm meeting', "
+        "'show me the location of the Team Standup event', etc. "
         "Optionally narrow results to a specific time range."
     )
     parameters: Dict[str, Any] = {
@@ -486,13 +521,16 @@ class SearchCalendarEvents(Tool):
                 "type": "integer",
                 "description": "Maximum number of events to return. Default 10."
             },
+            "timezone_offset": {
+                "type": "number",
+            },
         },
-        "required": ["query"],
+        "required": ["query", "timezone_offset"],
         "additionalProperties": True,
     }
 
     async def run(self, arguments: Dict[str, Any]) -> ToolResult:
-        sys.stderr.write(f"[calendar-mcp] search_calendar_events args: {arguments}\n")
+        sys.stderr.write(f"[calendar-mcp] get_event_details args: {arguments}\n")
 
         auth_info = arguments.get("__auth_info")
         if not auth_info:
@@ -535,12 +573,17 @@ class SearchCalendarEvents(Tool):
                 return ToolResult(content=TextContent(type="text", text=f"No events found matching '{query}'."))
 
             formatted = [_format_event_summary(e) for e in events]
+            filtered_events = [_filter_event_fields(e) for e in events]
             return ToolResult(
-                structured_content=events,
+                # structured_content={"events": filtered_events},
+                structured_content={
+                    "status": "success",
+                    "msg": f"Found {len(events)} event(s) matching '{query}'.",
+                    "events": filtered_events
+                },
                 content=TextContent(
                     type="text",
-                    text=f"Found {
-                        len(events)} event(s) matching '{query}':\n" +
+                    text=f"Found {len(events)} event(s) matching '{query}':\n" +
                     "\n".join(formatted)),
             )
 
@@ -549,7 +592,7 @@ class SearchCalendarEvents(Tool):
             return ToolResult(content=TextContent(type="text", text=f"Error searching events: {str(e)}"))
 
 
-mcp.add_tool(SearchCalendarEvents())
+mcp.add_tool(GetEventDetails())
 
 
 if __name__ == "__main__":

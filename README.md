@@ -38,7 +38,7 @@ A calendar agent that retrieves events and reminders using the Google Calendar A
     - `REMOTE_AGENT_ADDRESSES`: Comma-separated list of remote agent URLs (e.g., `http://localhost:10001`).
     - `DATETIME_PARSER_AGENT`: Name of the datetime parser agent.
 
-    *Note: Ensure your Google Cloud OAuth consent screen is configured and the redirect URI `http://localhost:10010/auth/callback` is added to your OAuth client credentials.*
+    *Note: Ensure your Google Cloud OAuth consent screen is configured and the redirect URI `http://localhost:10004/auth/callback` is added to your OAuth client credentials.*
 
 ## Running the Agent Server
 
@@ -48,14 +48,14 @@ Start the calendar agent server:
 uv run __main__.py
 ```
 
-The agent will be available at `http://localhost:10010` (or the port specified in your `.env` file).
+The agent will be available at `http://localhost:10004` (or the port specified in your `.env` file).
 
 ## Running the CLI Client
 
 You can use the provided CLI tool to interact with the agent for testing.
 
 ```bash
-uv run cli --agent "http://localhost:10010"
+uv run cli --agent "http://localhost:10004"
 ```
 
 ### Authentication
@@ -66,7 +66,7 @@ The CLI supports both automatic and manual authentication.
 By default, the CLI will attempt to authenticate automatically. If a valid session token is not found for the specified profile, it will open your default web browser to the Google OAuth login page.
 
 ```bash
-uv run cli --agent "http://localhost:10010" --profile user1
+uv run cli --agent "http://localhost:10004" --profile user1
 ```
 
 **Manual Authentication**:
@@ -74,10 +74,30 @@ You can provide an existing token manually using the `--header` option or disabl
 
 ```bash
 # Provide a token manually
-uv run cli --agent "http://localhost:10010" --header "Authorization=Bearer <token>"
+uv run cli --agent "http://localhost:10004" --header "Authorization=Bearer <token>"
 
 # Disable automatic authentication
-uv run cli --agent "http://localhost:10010" --profile user1 --automatic-authentication false
+uv run cli --agent "http://localhost:10004" --profile user1 --automatic-authentication false
+```
+
+### Metadata
+
+You can pass custom metadata to the agent using the `--metadata` flag. This is useful for passing context like timezone. You can specify the flag multiple times to include multiple key-value pairs.
+
+Values are automatically parsed:
+- `true`/`false` (case-insensitive) are converted to booleans.
+- Numbers are converted to integers or floats.
+- All other values remain strings.
+
+```bash
+# Single metadata key (numeric)
+uv run cli --agent "http://localhost:10004" --metadata timezone=7
+
+# Boolean value
+uv run cli --agent "http://localhost:10004" --metadata single_time_mode=true
+
+# Multiple metadata keys
+uv run cli --agent "http://localhost:10004" --metadata timezone=7 --metadata language=en-US
 ```
 
 ### CLI Usage
